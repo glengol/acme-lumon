@@ -312,7 +312,7 @@ _(filled in during step 3; decisions made earlier are recorded here as they happ
 
 ### D7: Admin (question 3)
 - **Seen:** no admin field in the API. One group is named "AI Platform Admins", and it contains a nested group.
-- **Decision:** admins are the **effective members** (expanded recursively, with a cycle guard) of a **config list of admin groups**, starting with `["AI Platform Admins"]`, matched by group id after the first lookup.
+- **Decision:** admins are the **effective members** (expanded recursively, with a cycle guard) of a **config list of admin groups**, starting with `["AI Platform Admins"]`. Each config entry matches a group **by id, or by name ignoring case and surrounding spaces**. An entry that matches no group is reported as a WARNING, never silently treated as "no admins". `admin_via` shows the shortest path.
 - Question 3 asks for **human** admins only. Service-account admins are listed separately as their own finding.
 - → Confirm with Acme which groups or roles grant admin rights.
 

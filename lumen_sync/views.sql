@@ -3,12 +3,14 @@
 
 DROP VIEW IF EXISTS v_identities;
 DROP VIEW IF EXISTS v_admins;
+DROP VIEW IF EXISTS v_admin_groups_missing;
 DROP VIEW IF EXISTS v_agent_paths;
 
 -- Identities with the derived flags every question needs.
 --   is_active:   status (already lowercased) is exactly 'active'. Anything else,
 --                including an unexpected or missing value, counts as NOT active.
---   is_internal: email domain is a customer domain or a subdomain of one.
+--   is_internal: email domain is a customer domain or a subdomain of one
+--                (exact suffix compare, not LIKE, where '_' would be a wildcard).
 --                NULL when there is no email (cannot tell).
 CREATE VIEW v_identities AS
 SELECT i.*,
@@ -16,31 +18,51 @@ SELECT i.*,
        CASE WHEN i.email_domain IS NULL THEN NULL
             WHEN EXISTS (SELECT 1 FROM internal_domains d
                          WHERE i.email_domain = d.domain
-                            OR i.email_domain LIKE '%.' || d.domain) THEN 1
+                            OR substr(i.email_domain, -length(d.domain) - 1) = '.' || d.domain) THEN 1
             ELSE 0 END AS is_internal
 FROM identities i;
 
 -- Admins = effective user members of the configured admin groups, following
--- nested groups to any depth. `path_ids` stops cycles (a group is never
--- visited twice on the same path). `via` shows how the user became an admin.
+-- nested groups to any depth.
+--   * A configured entry matches a group by id, or by name ignoring case and
+--     surrounding spaces, so "AI Platform Admins " still matches.
+--   * `path_ids` stops cycles (a group is never visited twice on one path).
+--   * `admin_via` is the shortest path by which the user became an admin.
+-- v_admin_groups_missing lists configured entries that matched no group, so a
+-- typo shows up as a warning instead of silently returning zero admins.
+CREATE VIEW v_admin_groups_missing AS
+SELECT a.source_app, a.group_name
+FROM admin_groups a
+WHERE NOT EXISTS (SELECT 1 FROM groups g
+                  WHERE g.source_app = a.source_app
+                    AND (g.external_id = trim(a.group_name)
+                         OR lower(trim(g.name)) = lower(trim(a.group_name))));
+
 CREATE VIEW v_admins AS
-WITH RECURSIVE admin_tree (source_app, group_id, via, path_ids) AS (
-    SELECT g.source_app, g.external_id, g.name, '/' || g.external_id || '/'
+WITH RECURSIVE admin_tree (source_app, group_id, via, path_ids, depth) AS (
+    SELECT g.source_app, g.external_id, g.name, '/' || g.external_id || '/', 0
     FROM groups g
-    JOIN admin_groups a ON a.source_app = g.source_app AND a.group_name = g.name
+    JOIN admin_groups a ON a.source_app = g.source_app
+                       AND (g.external_id = trim(a.group_name)
+                            OR lower(trim(g.name)) = lower(trim(a.group_name)))
     UNION
     SELECT m.source_app, m.member_id, t.via || ' > ' || COALESCE(g.name, m.member_id),
-           t.path_ids || m.member_id || '/'
+           t.path_ids || m.member_id || '/', t.depth + 1
     FROM admin_tree t
     JOIN group_members m ON m.source_app = t.source_app AND m.group_id = t.group_id AND m.member_type = 'group'
     LEFT JOIN groups g ON g.source_app = m.source_app AND g.external_id = m.member_id
     WHERE instr(t.path_ids, '/' || m.member_id || '/') = 0
+),
+paths AS (
+    SELECT m.source_app, m.member_id AS user_id, t.via,
+           ROW_NUMBER() OVER (PARTITION BY m.source_app, m.member_id ORDER BY t.depth, t.via) AS n
+    FROM admin_tree t
+    JOIN group_members m ON m.source_app = t.source_app AND m.group_id = t.group_id AND m.member_type = 'user'
 )
-SELECT i.*, MIN(t.via) AS admin_via
-FROM admin_tree t
-JOIN group_members m ON m.source_app = t.source_app AND m.group_id = t.group_id AND m.member_type = 'user'
-JOIN v_identities i ON i.source_app = m.source_app AND i.external_id = m.member_id
-GROUP BY i.source_app, i.external_id;
+SELECT i.*, p.via AS admin_via
+FROM paths p
+JOIN v_identities i ON i.source_app = p.source_app AND i.external_id = p.user_id
+WHERE p.n = 1;
 
 -- One row per agent tool: what it reaches, whether that is sensitive or
 -- external, and who (if anyone) is on record as authorizing it.
@@ -92,6 +114,6 @@ SELECT b.*,
             THEN 1 ELSE 0 END AS is_sensitive,
        CASE WHEN b.tool_kind = 'http' AND (b.target_host IS NULL OR NOT EXISTS (
                  SELECT 1 FROM internal_domains d
-                 WHERE b.target_host = d.domain OR b.target_host LIKE '%.' || d.domain))
+                 WHERE b.target_host = d.domain OR substr(b.target_host, -length(d.domain) - 1) = '.' || d.domain))
             THEN 1 ELSE 0 END AS is_external
 FROM base b;
