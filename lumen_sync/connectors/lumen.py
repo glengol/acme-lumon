@@ -9,9 +9,10 @@ API behaviour this code relies on, all observed by probing (see PLAN.md, API map
   suggests self-declaring scopes in an `X-Lumen-Scopes` header. We never send
   that header: permissions come from the token Acme issued, not from us.
 - Audit is a log, so it is collected incrementally (`since` = newest stored
-  event minus an overlap) and stored append-only. Events that age out of
-  Lumen's retention are kept here. If a response carries `total_pages`, every
-  page is fetched.
+  event minus a 24 h overlap; an explicit epoch on the first run) and stored
+  append-only. Events that age out of Lumen's retention are kept here. If a
+  response carries `total_pages`, every page is fetched, and the page count
+  may grow while we read (a live log), which is tolerated for append-only data.
 """
 
 from __future__ import annotations
@@ -24,7 +25,11 @@ from .base import (Connector, FetchResult, Resource, email_domain, lower_or_none
                    tri_state_bool, url_host)
 
 MAX_PAGES = 10_000                     # safety stop in case total_pages is ever absurd
-AUDIT_OVERLAP = timedelta(minutes=10)  # re-read a little before the cursor; duplicates are harmless
+# Re-read a day before the newest stored event, so events that are logged late
+# (with an older timestamp) are still picked up. Re-read events land on the
+# same row (event id is the key), so the overlap costs bandwidth, not correctness.
+AUDIT_OVERLAP = timedelta(hours=24)
+AUDIT_EPOCH = "1970-01-01T00:00:00Z"   # explicit "from the beginning" for the first collection
 
 
 class LumenConnector(Connector):
@@ -45,26 +50,32 @@ class LumenConnector(Connector):
 
     # ------------------------------------------------------------ fetching
 
-    def _single(self, path: str, params: dict | None = None) -> FetchResult:
+    def _single(self, path: str, params: dict | None = None, strict: bool = True) -> FetchResult:
         """One call. If the response turns out to be paginated, follow it."""
         body = self.client.get_json(path, params)
         if "total_pages" in body:
-            return self._paged(path, params, first=body)
+            return self._paged(path, params, first=body, strict=strict)
         items, notes = _dedupe(_data(path, body))
         return FetchResult(items, pages=None, notes=notes)
 
     def _audit(self, cursor: str | None) -> FetchResult:
         if cursor is None:
-            result = self._single("/v1/audit")
-            result.notes.append("full history (first collection)")
-            return result
-        since = _parse_time(cursor) - AUDIT_OVERLAP
-        since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-        result = self._single("/v1/audit", {"since": since_text})
-        result.notes.append(f"incremental since {since_text}")
+            since_text, label = AUDIT_EPOCH, "full history"
+        else:
+            since_text = (_parse_time(cursor) - AUDIT_OVERLAP).strftime("%Y-%m-%dT%H:%M:%SZ")
+            label = "incremental"
+        result = self._single("/v1/audit", {"since": since_text}, strict=False)
+        result.notes.append(f"{label} since {since_text}")
         return result
 
-    def _paged(self, path: str, params: dict | None = None, first: dict | None = None) -> FetchResult:
+    def _paged(self, path: str, params: dict | None = None, first: dict | None = None,
+               strict: bool = True) -> FetchResult:
+        """Read pages 1..total_pages.
+
+        strict=True (snapshots): abort if total_pages changes mid-read, because a
+        mixed snapshot is not safe to store. strict=False (append-only logs): a
+        growing log is normal, so keep reading up to the newest page count.
+        """
         params = dict(params or {})
         if first is None:
             first = self.client.get_json(path, {**params, "page": 1})
@@ -75,12 +86,16 @@ class LumenConnector(Connector):
             raise ApiError(path, 200, f"total_pages_too_large ({total})", first)
 
         items = list(_data(path, first))
-        for page in range(2, total + 1):
+        page = 2
+        while page <= total:
             body = self.client.get_json(path, {**params, "page": page})
-            if body.get("total_pages") != total:
-                # The list changed while we paged; a mixed snapshot is not safe to store.
-                raise ApiError(path, 200, f"total_pages_changed ({total} -> {body.get('total_pages')})", body)
+            now_total = body.get("total_pages")
+            if now_total != total:
+                if strict or not isinstance(now_total, int) or now_total > MAX_PAGES:
+                    raise ApiError(path, 200, f"total_pages_changed ({total} -> {now_total})", body)
+                total = max(total, now_total)
             items.extend(_data(path, body))
+            page += 1
         items, notes = _dedupe(items)
         return FetchResult(items, pages=total, notes=notes)
 

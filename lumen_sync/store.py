@@ -70,11 +70,15 @@ class Store:
                 self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
 
     def append_resource(self, run_id: int, source_app: str, resource: str, tables: tuple[str, ...],
-                        raw_items: list[dict], rows: dict[str, list[dict]]) -> None:
+                        raw_items: list[dict], rows: dict[str, list[dict]]) -> int:
         """Add or update rows by primary key, never delete. For logs such as audit events.
 
         Re-fetching an overlap window is harmless: the same event id lands on the same row.
+        Returns how many records were new (not already stored).
         """
+        known = {r[0] for r in self.db.execute(
+            "SELECT external_id FROM raw_records WHERE source_app = ? AND resource = ?", (source_app, resource))}
+        new_count = sum(1 for item in raw_items if item["id"] not in known)
         with self.db:
             self.db.executemany(
                 "INSERT OR REPLACE INTO raw_records (source_app, resource, external_id, payload, run_id) "
@@ -88,6 +92,7 @@ class Store:
                 sql = (f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) "
                        f"VALUES ({', '.join('?' * len(columns))})")
                 self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
+        return new_count
 
     def newest(self, source_app: str, table: str, column: str) -> str | None:
         """Largest stored value of `column` for this app, used as an incremental-fetch cursor."""

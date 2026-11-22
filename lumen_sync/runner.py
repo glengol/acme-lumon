@@ -34,9 +34,14 @@ def run_sync(connector: Connector, store: Store, base_url: str) -> int:
             failed += 1
             store.record_coverage(run_id, res.name, "failed", error=f"{type(exc).__name__}: {exc}")
             continue
-        write = store.append_resource if res.mode == "append" else store.replace_resource
-        write(run_id, connector.source_app, res.name, res.tables, result.items, rows)
-        store.record_coverage(run_id, res.name, "ok", records=len(result.items), pages=result.pages,
+        if res.mode == "append":
+            new = store.append_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
+            result.notes.append(f"{new} new, {len(result.items) - new} already stored")
+            records = new
+        else:
+            store.replace_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
+            records = len(result.items)
+        store.record_coverage(run_id, res.name, "ok", records=records, pages=result.pages,
                               detail="; ".join(result.notes) or None)
         ok += 1
 

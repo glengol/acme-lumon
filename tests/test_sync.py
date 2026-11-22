@@ -31,7 +31,8 @@ USERS = [{"id": f"u-{i}", "display_name": f"User {i}", "email": f"user{i}@exampl
 AGENTS = [{"id": "a-1", "name": "Bot", "owner_id": "u-0", "status": "active",
            "tools": [{"id": "t-1", "kind": "http", "target": "https://Hooks.Example.net/x",
                       "connection_id": None, "scopes": []}]}]
-STATE = {"fail_all": False, "audit_allowed": False, "events": [], "since_seen": []}
+STATE = {"fail_all": False, "audit_allowed": False, "events": [], "since_seen": [],
+         "audit_paged": False, "grow_after_first_page": []}
 
 
 def event(n, time):
@@ -60,9 +61,16 @@ class FakeApi(BaseHTTPRequestHandler):
             if not STATE["audit_allowed"]:
                 return self._send(403, {"error": "insufficient_scope", "required_scopes": ["audit.read"]})
             since = parse_qs(url.query).get("since", [None])[0]
-            STATE["since_seen"].append(since)
+            if page == 1:
+                STATE["since_seen"].append(since)
             events = [e for e in STATE["events"] if since is None or e["time"] >= since]
-            return self._send(200, {"data": events})
+            if not STATE["audit_paged"]:
+                return self._send(200, {"data": events})
+            body = self._page(events, page)
+            if page == 1 and STATE["grow_after_first_page"]:   # a live log grows while we read it
+                STATE["events"] += STATE.pop("grow_after_first_page")
+                STATE["grow_after_first_page"] = []
+            return self._send(200, body)
         return self._send(404, {"error": "not_found"})
 
     @staticmethod
@@ -95,7 +103,8 @@ class SyncTest(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        STATE.update(fail_all=False, audit_allowed=False, events=[], since_seen=[])
+        STATE.update(fail_all=False, audit_allowed=False, events=[], since_seen=[],
+                     audit_paged=False, grow_after_first_page=[])
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(str(Path(self.tmp.name) / "t.db"))
 
@@ -152,22 +161,44 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(cov["users"]["http_status"], 401)
         self.assertIn("token", cov["users"]["detail"])
 
+    def event_ids(self):
+        return [r[0] for r in self.store.db.execute("SELECT external_id FROM events ORDER BY 1")]
+
     def test_audit_is_incremental_and_keeps_events_lumen_has_dropped(self):
         STATE["audit_allowed"] = True
         STATE["events"] = [event(1, "2026-11-01T10:00:00Z"), event(2, "2026-11-02T10:00:00Z")]
         first = self.coverage(self.sync())
         self.assertEqual(first["audit"]["status"], "ok")
-        self.assertEqual(STATE["since_seen"], [None])                 # first run: full history
+        self.assertEqual(STATE["since_seen"], ["1970-01-01T00:00:00Z"])  # first run: explicit full history
 
         # Lumen's retention drops e-1, and a new event e-3 arrives.
         STATE["events"] = [event(2, "2026-11-02T10:00:00Z"), event(3, "2026-11-03T10:00:00Z")]
-        self.sync()
-        self.assertEqual(STATE["since_seen"][-1], "2026-11-02T09:50:00Z")  # newest stored minus 10 min overlap
-        ids = [r[0] for r in self.store.db.execute("SELECT external_id FROM events ORDER BY 1")]
-        self.assertEqual(ids, ["e-1", "e-2", "e-3"])                  # e-1 kept, e-2 not duplicated
+        cov = self.coverage(self.sync())
+        self.assertEqual(STATE["since_seen"][-1], "2026-11-01T10:00:00Z")  # newest stored minus 24 h
+        self.assertEqual(self.event_ids(), ["e-1", "e-2", "e-3"])        # e-1 kept, e-2 not duplicated
+        self.assertEqual(cov["audit"]["records"], 1)                      # only e-3 counted as new
+        self.assertIn("1 new, 1 already stored", cov["audit"]["detail"])
 
-        self.sync()                                                   # nothing new: still exactly 3
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 3)
+        self.sync()                                                       # nothing new: still exactly 3
+        self.assertEqual(len(self.event_ids()), 3)
+
+    def test_audit_picks_up_events_logged_late(self):
+        STATE["audit_allowed"] = True
+        STATE["events"] = [event(1, "2026-11-03T10:00:00Z")]
+        self.sync()
+        # e-2 shows up later but is stamped 20 hours before the newest stored event.
+        STATE["events"].append(event(2, "2026-11-02T14:00:00Z"))
+        self.sync()
+        self.assertEqual(self.event_ids(), ["e-1", "e-2"])
+
+    def test_audit_tolerates_a_log_that_grows_while_paging(self):
+        STATE.update(audit_allowed=True, audit_paged=True)
+        STATE["events"] = [event(i, f"2026-11-0{i}T10:00:00Z") for i in range(1, 5)]   # 2 pages
+        STATE["grow_after_first_page"] = [event(5, "2026-11-05T10:00:00Z"),
+                                          event(6, "2026-11-06T10:00:00Z")]             # becomes 3 pages
+        cov = self.coverage(self.sync())
+        self.assertEqual(cov["audit"]["status"], "ok")
+        self.assertEqual(self.event_ids(), [f"e-{i}" for i in range(1, 7)])
 
     def test_queries_never_blank_out_when_fields_are_missing(self):
         """In SQL, 'x' || NULL is NULL. One missing field must not empty a whole answer cell."""
