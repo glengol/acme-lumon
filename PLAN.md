@@ -92,7 +92,7 @@ SQL for questions 1–3, run against the database, with the results kept for `su
 | API unreachable after a good run | All resources `network_error`, explained in coverage; existing data untouched; exit code 1 |
 | Missing env vars | Clear error, exit code 2 |
 | Answers vs raw responses | Q1–Q3 match the independent hand analysis from step 2 |
-| Automated | `python3 -m unittest -v`: 31 tests. 17 run the collector against a fake API with invented data, 11 check the analysis rules on hand-built databases, and 3 run an invented second app through the same code to prove reuse (nested groups and cycles, every Q1/Q3 reason, sensitive/external rules, Q2 authorizers). The collector tests cover: paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
+| Automated | `python3 -m unittest -v`: 33 tests. 18 run the collector against a fake API with invented data, 11 check the analysis rules on hand-built databases, and 4 run an invented second app through the same code to prove reuse (nested groups and cycles, every Q1/Q3 reason, sensitive/external rules, Q2 authorizers). The collector tests cover: paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
 
 Problems found and fixed during verification:
 1. **The report claimed data was unusable after a failed run, even though the previous copy was intact.** It now prints per-resource freshness: when each resource was last collected, and whether its latest attempt failed (STALE / NEVER COLLECTED).

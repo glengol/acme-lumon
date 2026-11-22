@@ -26,7 +26,7 @@ What I would change before running this for a real customer, most important firs
 | **Policy config** | `config.json` in the repo | Owned and approved by the customer, versioned, with a record of who changed what. |
 | **Findings** | SQL queries printed to a terminal | Findings become tracked records with an owner, a status and a due date, and feed into Reco's product rather than a report. |
 | **Observability** | Coverage report on stdout | Structured logs and metrics per run and per resource: records, pages, latency, errors. |
-| **Vendor issue** | Reported in this summary | Responsible disclosure to Lumen of the `X-Lumen-Scopes` hint (see the customer summary, finding 3). |
+| **Vendor issue** | Reported in a separate note to Acme's security team | Responsible disclosure to Lumen of the `X-Lumen-Scopes` hint (see the security team note after the customer summary). |
 
 ---
 
@@ -234,7 +234,7 @@ Not in Q3, because it is not human: the service account **svc-lumen (u-1006)** i
 > **To:** Acme Security
 > **Subject:** Lumen AI agents: first security review (data as of 9 November 2026)
 >
-> This summary can be forwarded to IT, except the boxed note in finding 3, which is for Acme's security team only. Findings are ordered by importance. Each one says what we saw, why it matters and what to do.
+> This summary can be forwarded to IT as is. A separate note for Acme's security team follows it. Findings are ordered by importance. Each one says what we saw, why it matters and what to do.
 
 **TL;DR**
 1. **Act today:** "Finance Copilot" reads payroll and can send data to an outside address. Its owner and the person who approved its payroll access have both been deprovisioned, and it was used on 8 November. Disable it or remove the outside webhook.
@@ -278,9 +278,6 @@ We cannot yet see whether payroll data was actually sent to the outside address,
 The token Acme issued for this integration **does not have `audit.read`**. The audit endpoint returned `403 insufficient_scope`. So we cannot see logins, tool invocations or OAuth grants, which means we cannot confirm or rule out data leaving through finding 1.
 
 **Action:** grant `audit.read` to the integration token.
-
-> **For Acme's security team only (please do not forward more widely until the vendor responds).**
-> The 403 message tells callers to declare their own permissions in an `X-Lumen-Scopes` request header. If Lumen trusts a permission the caller declares, any Lumen token holder might be able to read the audit log. **This is unconfirmed:** we deliberately did not send the header, because that would mean accessing data Acme did not grant us. Please raise it with Lumen as a possible vulnerability and ask them to confirm whether the header is trusted.
 
 ### Finding 4 (high): an admin with unconfirmed MFA who has not logged in for 60 days
 
@@ -346,9 +343,24 @@ These tools are not backed by a stored connection, so Lumen records nobody as ap
 
 1. **Today:** disable or contain Finance Copilot (finding 1).
 2. Grant **`audit.read`** to the integration token, and confirm the token is read-only.
-3. **Security team:** raise the vendor question in finding 3 with Lumen.
+3. **Security team:** see the separate note below.
 4. Assign an owner to Shadow Research Bot, or disable it, and decide on contractor-approved connections.
 5. Review admin access for James Miller and svc-lumen, and enforce MFA.
 6. Confirm our working definitions: admin groups, Acme domains, sensitive apps, and status values.
 
 Once audit access is in place, we will re-run the collection and follow up with what the agents actually did.
+
+---
+
+## Note for Acme's security team (separate from the summary above)
+
+**Not for wide forwarding until Lumen responds.**
+
+When the integration token was refused access to the audit log (finding 3), Lumen's error message told the caller to **declare its own permissions in an `X-Lumen-Scopes` request header**. Permissions should come from the token, on Lumen's side. If Lumen instead trusts a permission the caller declares, **any Lumen token holder might be able to read the audit log, and possibly more.**
+
+**This is unconfirmed.** We deliberately did not send the header, because that would mean accessing data Acme did not grant us.
+
+**What we suggest:**
+1. Raise it with Lumen as a possible vulnerability, and ask them to confirm whether the header is trusted.
+2. Until they answer, assume any Lumen token may be able to read the audit log, and keep Lumen tokens as tightly held as admin credentials.
+3. If you want it tested directly, we can do that only with your written approval, ideally on a test tenant.

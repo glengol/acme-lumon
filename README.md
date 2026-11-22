@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 31 tests: 17 run the collector against a small fake API, 11 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases, and 3 prove a second app reuses the same tables, views and queries. The mock does not need to be running.
+These are 33 tests: 18 run the collector against a small fake API, 11 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases, and 4 prove a second app reuses the same tables, views and queries. The mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -172,6 +172,7 @@ The program has three stages. Each stage only talks to the next one.
 - Each endpoint is fetched **completely** first. Only then are its rows replaced, **in one transaction**.
 - Running twice gives identical data, so there are no duplicates.
 - If an endpoint fails, its previous data is **kept**, and the report marks it **STALE**. That includes a failed database write (for example a field of the wrong type): it is recorded for that endpoint and the run carries on.
+- **Nothing is dropped silently.** A tool with no id is kept under a generated id, a repeated id gets a suffix, and anything skipped while mapping (such as a group member with no id) is counted in the coverage report. Rows are written by column name, so values can never shift into the wrong column.
 - **An endpoint that suddenly returns an empty list is refused** when data is already stored, because that is far more often an API fault than a real deletion. Pass `--allow-empty` to accept it.
 - **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 24-hour overlap, so events logged late are not missed) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept. A stored event with an unreadable or future time is ignored when choosing where to start, and a log whose page count changes while it is read is read twice and merged.
 
