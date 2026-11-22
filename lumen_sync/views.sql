@@ -46,7 +46,8 @@ GROUP BY i.source_app, i.external_id;
 -- external, and who (if anyone) is on record as authorizing it.
 --   app:          the connection's app, else the connector target. NULL for http.
 --   is_sensitive: connector to an app NOT explicitly classified as non-sensitive
---                 ("if in doubt, sensitive"), or any write/admin scope.
+--                 ("if in doubt, sensitive"), or any single scope (checked one by
+--                 one with json_each) that grants write or admin access.
 --   is_external:  http tool whose host is not a customer domain or subdomain.
 CREATE VIEW v_agent_paths AS
 WITH base AS (
@@ -82,9 +83,10 @@ WITH base AS (
 SELECT b.*,
        CASE WHEN b.tool_kind <> 'http' AND (
                  NOT EXISTS (SELECT 1 FROM app_classification ac WHERE ac.app = b.app AND ac.sensitive = 0)
-                 OR lower(b.tool_scopes) LIKE '%write%' OR lower(b.tool_scopes) LIKE '%admin%'
-                 OR lower(COALESCE(b.connection_scopes, '')) LIKE '%write%'
-                 OR lower(COALESCE(b.connection_scopes, '')) LIKE '%admin%')
+                 OR EXISTS (SELECT 1 FROM json_each(b.tool_scopes) s
+                             WHERE lower(s.value) LIKE '%write%' OR lower(s.value) LIKE '%admin%')
+                 OR EXISTS (SELECT 1 FROM json_each(b.connection_scopes) s
+                             WHERE lower(s.value) LIKE '%write%' OR lower(s.value) LIKE '%admin%'))
             THEN 1 ELSE 0 END AS is_sensitive,
        CASE WHEN b.tool_kind = 'http' AND (b.target_host IS NULL OR NOT EXISTS (
                  SELECT 1 FROM internal_domains d
