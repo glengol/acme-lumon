@@ -35,29 +35,31 @@ class AnalysisTest(unittest.TestCase):
 
     def user(self, uid, kind="human", status="active", mfa=1, login="2026-11-08T09:00:00Z", email=None):
         self.db.execute(
-            "INSERT INTO identities (source_app, external_id, display_name, kind, status_raw, status, mfa_enabled, "
-            "last_login_at, email, email_domain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO identities (source_app, resource, external_id, display_name, kind, status_raw, status, "
+            "mfa_enabled, last_login_at, email, email_domain) VALUES (?, 'users', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (APP, uid, uid.upper(), kind, status, status.lower() if status else None, mfa, login, email,
              email.split("@")[1] if email else None))
 
     def group(self, gid, name, *members):
-        self.db.execute("INSERT INTO groups (source_app, external_id, name) VALUES (?, ?, ?)", (APP, gid, name))
+        self.db.execute("INSERT INTO groups (source_app, resource, external_id, name) VALUES (?, 'groups', ?, ?)",
+                        (APP, gid, name))
         for member in members:
             kind, mid = member.split(":")
-            self.db.execute("INSERT INTO group_members VALUES (?, ?, ?, ?)", (APP, gid, kind, mid))
+            self.db.execute("INSERT INTO group_members (source_app, resource, group_id, member_type, member_id) "
+                            "VALUES (?, 'groups', ?, ?, ?)", (APP, gid, kind, mid))
 
     def agent(self, aid, owner=None, status="active"):
-        self.db.execute("INSERT INTO agents (source_app, external_id, name, owner_id, status_raw, status) "
-                        "VALUES (?, ?, ?, ?, ?, ?)", (APP, aid, aid, owner, status, status))
+        self.db.execute("INSERT INTO agents (source_app, resource, external_id, name, owner_id, status_raw, status) "
+                        "VALUES (?, 'agents', ?, ?, ?, ?, ?)", (APP, aid, aid, owner, status, status))
 
     def tool(self, aid, tid, kind, target, connection=None, scopes=(), host=None):
-        self.db.execute("INSERT INTO agent_tools (source_app, agent_id, tool_id, kind, target, target_host, "
-                        "connection_id, scopes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        self.db.execute("INSERT INTO agent_tools (source_app, resource, agent_id, tool_id, kind, target, target_host, "
+                        "connection_id, scopes) VALUES (?, 'agents', ?, ?, ?, ?, ?, ?, ?)",
                         (APP, aid, tid, kind, target, host, connection, json.dumps(list(scopes))))
 
     def connection(self, cid, app, authorized_by, scopes=("read",)):
-        self.db.execute("INSERT INTO connections (source_app, external_id, app, authorized_by, scopes) "
-                        "VALUES (?, ?, ?, ?, ?)", (APP, cid, app, authorized_by, json.dumps(list(scopes))))
+        self.db.execute("INSERT INTO connections (source_app, resource, external_id, app, authorized_by, scopes) "
+                        "VALUES (?, 'connections', ?, ?, ?, ?)", (APP, cid, app, authorized_by, json.dumps(list(scopes))))
 
     def query(self, name):
         cursor = self.db.execute((QUERIES / name).read_text())
@@ -147,12 +149,12 @@ class AnalysisTest(unittest.TestCase):
 
     def test_sensitive_rules_if_in_doubt(self):
         self.agent("a-1")
-        self.tool("a-1", "t-cleared", "saas_connector", "wiki", scopes=["read"])
-        self.tool("a-1", "t-cleared-write", "saas_connector", "wiki", scopes=["pages:Write"])
-        self.tool("a-1", "t-unlisted", "saas_connector", "crm", scopes=["read"])
-        self.tool("a-1", "t-listed", "saas_connector", "payroll", scopes=["read"])
+        self.tool("a-1", "t-cleared", "app_connection", "wiki", scopes=["read"])
+        self.tool("a-1", "t-cleared-write", "app_connection", "wiki", scopes=["pages:Write"])
+        self.tool("a-1", "t-unlisted", "app_connection", "crm", scopes=["read"])
+        self.tool("a-1", "t-listed", "app_connection", "payroll", scopes=["read"])
         self.tool("a-1", "t-nokind", None, "crm", scopes=["read"])
-        self.tool("a-1", "t-name-only", "saas_connector", "wiki", scopes=["read"])
+        self.tool("a-1", "t-name-only", "app_connection", "wiki", scopes=["read"])
         self.db.execute("UPDATE agents SET name = 'Wiki write-ups' WHERE external_id = 'a-1'")  # name is not a scope
         self.assertEqual(self.path("t-cleared"), (0, 0))
         self.assertEqual(self.path("t-cleared-write"), (1, 0))       # write scope beats the safe list
@@ -172,7 +174,7 @@ class AnalysisTest(unittest.TestCase):
             "t-unparsed": (None, 1),                                 # unparseable URL: treat as external
         }
         for tid, (host, _) in cases.items():
-            self.tool("a-1", tid, "http", f"https://{host}/x", host=host)
+            self.tool("a-1", tid, "outbound_url", f"https://{host}/x", host=host)
         for tid, (_, external) in cases.items():
             self.assertEqual(self.path(tid)[1], external, tid)
 
@@ -181,10 +183,10 @@ class AnalysisTest(unittest.TestCase):
         self.user("u-contractor", email="c@partner.example")
         self.agent("a-leak", "u-owner")
         self.connection("c-1", "payroll", "u-contractor")
-        self.tool("a-leak", "t-pay", "saas_connector", "payroll", connection="c-1", scopes=["read"])
-        self.tool("a-leak", "t-hook", "http", "https://x.vendor.example/h", host="x.vendor.example")
+        self.tool("a-leak", "t-pay", "app_connection", "payroll", connection="c-1", scopes=["read"])
+        self.tool("a-leak", "t-hook", "outbound_url", "https://x.vendor.example/h", host="x.vendor.example")
         self.agent("a-broken", "u-owner")
-        self.tool("a-broken", "t-missing", "saas_connector", "payroll", connection="c-nope")
+        self.tool("a-broken", "t-missing", "app_connection", "payroll", connection="c-nope")
         rows = {r["agent_id"] + "/" + r["reaches"]: r for r in self.query("q2_sensitive_or_external_paths.sql")}
 
         pay = rows["a-leak/payroll"]

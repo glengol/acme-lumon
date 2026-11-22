@@ -45,6 +45,15 @@ class Connector:
         raise NotImplementedError
 
 
+# ---------------------------------------------------------------- neutral vocabulary
+# Connectors map their app's own words onto these, so views and queries stay app-neutral.
+
+IDENTITY_HUMAN = "human"
+IDENTITY_SERVICE = "service"
+TOOL_APP_CONNECTION = "app_connection"   # reaches another app through a stored or built-in login
+TOOL_OUTBOUND_URL = "outbound_url"       # sends requests to an arbitrary URL (webhook, HTTP call)
+
+
 # ---------------------------------------------------------------- shared helpers
 
 def lower_or_none(value) -> str | None:

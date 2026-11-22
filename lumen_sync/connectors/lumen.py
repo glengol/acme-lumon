@@ -21,8 +21,11 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..http import ApiError, HttpClient
-from .base import (Connector, FetchResult, Resource, email_domain, lower_or_none,
-                   tri_state_bool, url_host)
+from .base import (TOOL_APP_CONNECTION, TOOL_OUTBOUND_URL, Connector, FetchResult, Resource,
+                   email_domain, lower_or_none, tri_state_bool, url_host)
+
+# Lumen's tool kinds -> neutral kinds. Anything unknown is kept as received.
+TOOL_KINDS = {"saas_connector": TOOL_APP_CONNECTION, "http": TOOL_OUTBOUND_URL}
 
 MAX_PAGES = 10_000                     # safety stop in case total_pages is ever absurd
 # Re-read a day before the newest stored event, so events that are logged late
@@ -133,10 +136,12 @@ class LumenConnector(Connector):
             for t in a.get("tools") or []:
                 if not isinstance(t, dict) or not t.get("id"):
                     continue
-                kind = lower_or_none(t.get("kind"))
+                kind_raw = lower_or_none(t.get("kind"))
+                kind = TOOL_KINDS.get(kind_raw, kind_raw)
                 tools.append({
-                    "agent_id": a["id"], "tool_id": t["id"], "kind": kind, "target": t.get("target"),
-                    "target_host": url_host(t.get("target")) if kind == "http" else None,
+                    "agent_id": a["id"], "tool_id": t["id"], "kind": kind, "kind_raw": kind_raw,
+                    "target": t.get("target"),
+                    "target_host": url_host(t.get("target")) if kind == TOOL_OUTBOUND_URL else None,
                     "connection_id": t.get("connection_id"),
                     "scopes": json.dumps(t.get("scopes") or []),
                 })

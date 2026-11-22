@@ -68,11 +68,11 @@ WHERE p.n = 1;
 
 -- One row per agent tool: what it reaches, whether that is sensitive or
 -- external, and who (if anyone) is on record as authorizing it.
---   app:          the connection's app, else the connector target. NULL for http.
+--   app:          the connection's app, else the connector target. NULL for outbound_url.
 --   is_sensitive: connector to an app NOT explicitly classified as non-sensitive
 --                 ("if in doubt, sensitive"), or any single scope (checked one by
 --                 one with json_each) that grants write or admin access.
---   is_external:  http tool whose host is not a customer domain or subdomain.
+--   is_external:  outbound_url tool whose host is not a customer domain or subdomain.
 CREATE VIEW v_agent_paths AS
 WITH base AS (
     SELECT t.source_app,
@@ -89,7 +89,7 @@ WITH base AS (
            t.target,
            t.target_host,
            t.scopes        AS tool_scopes,
-           CASE WHEN t.kind = 'http' THEN NULL ELSE lower(COALESCE(c.app, t.target)) END AS app,  -- unknown kind counts as a connector
+           CASE WHEN t.kind = 'outbound_url' THEN NULL ELSE lower(COALESCE(c.app, t.target)) END AS app,  -- unknown kind counts as a connector
            t.connection_id,
            c.external_id   AS connection_ref,   -- NULL when connection_id does not resolve
            c.name          AS connection_name,
@@ -108,15 +108,31 @@ WITH base AS (
     LEFT JOIN v_identities au ON au.source_app = c.source_app AND au.external_id = c.authorized_by
 )
 SELECT b.*,
-       CASE WHEN COALESCE(b.tool_kind, '') <> 'http' AND (
+       CASE WHEN COALESCE(b.tool_kind, '') <> 'outbound_url' AND (
                  NOT EXISTS (SELECT 1 FROM app_classification ac WHERE ac.app = b.app AND ac.sensitive = 0)
                  OR EXISTS (SELECT 1 FROM json_each(b.tool_scopes) s
                              WHERE lower(s.value) LIKE '%write%' OR lower(s.value) LIKE '%admin%')
                  OR EXISTS (SELECT 1 FROM json_each(b.connection_scopes) s
                              WHERE lower(s.value) LIKE '%write%' OR lower(s.value) LIKE '%admin%'))
             THEN 1 ELSE 0 END AS is_sensitive,
-       CASE WHEN b.tool_kind = 'http' AND (b.target_host IS NULL OR NOT EXISTS (
+       CASE WHEN b.tool_kind = 'outbound_url' AND (b.target_host IS NULL OR NOT EXISTS (
                  SELECT 1 FROM internal_domains d
                  WHERE b.target_host = d.domain OR substr(b.target_host, -length(d.domain) - 1) = '.' || d.domain))
             THEN 1 ELSE 0 END AS is_external
 FROM base b;
+
+-- One row per person (by email) across all apps, so a question like "agents
+-- owned by people who have left" can follow the same person from one platform
+-- to another. Accounts without an email (usually service accounts) are left out.
+DROP VIEW IF EXISTS v_person_accounts;
+CREATE VIEW v_person_accounts AS
+SELECT lower(email)                                   AS person,
+       COUNT(*)                                       AS accounts,
+       COUNT(DISTINCT source_app)                     AS apps,
+       group_concat(source_app || ':' || external_id || ' (' || COALESCE(status, 'no status') || ')', ', ')
+                                                      AS details,
+       MAX(is_active)                                 AS active_somewhere,
+       MIN(is_active)                                 AS active_everywhere
+FROM v_identities
+WHERE email IS NOT NULL
+GROUP BY lower(email);

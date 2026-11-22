@@ -4,7 +4,7 @@
 -- One row per qualifying tool (Decisions D4, D5, D6):
 --   sensitive = connector to an app not explicitly classified non-sensitive,
 --               or any write/admin scope ("if in doubt, sensitive")
---   external  = http tool to a host outside the customer's domains
+--   external  = outbound_url tool to a host outside the customer's domains
 --   authorizer = the connection's authorized_by; "none on record" when the tool
 --               has no stored connection. Never filled in with the owner.
 -- `agent_combines` flags an agent that holds BOTH a sensitive read and an
@@ -20,7 +20,7 @@ SELECT p.agent_id,
             WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
             ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
        END                                                         AS owner,
-       COALESCE(CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END, '-') AS reaches,
+       COALESCE(CASE WHEN p.tool_kind = 'outbound_url' THEN p.target ELSE p.app END, '-') AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
             ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
        END                                                         AS why,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = Path(__file__).with_name("schema.sql")
+SCHEMA_VERSION = 2  # bump when schema.sql changes shape; there are no migrations (see submission.md)
 VIEWS = Path(__file__).with_name("views.sql")
 
 
@@ -20,7 +21,15 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")  # make the REFERENCES in schema.sql real
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        has_tables = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'identities'").fetchone()
+        if has_tables and version != SCHEMA_VERSION:
+            self.db.close()
+            raise SystemExit(f"error: {path} was created by an older version (schema {version}, need "
+                             f"{SCHEMA_VERSION}). Delete it or pass a new --db, then run sync.")
         self.db.executescript(SCHEMA.read_text())
+        self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.db.executescript(VIEWS.read_text())
 
     # ------------------------------------------------------------ runs and coverage
@@ -62,13 +71,14 @@ class Store:
                 "INSERT INTO raw_records (source_app, resource, external_id, payload, run_id) VALUES (?, ?, ?, ?, ?)",
                 [(source_app, resource, item["id"], json.dumps(item, sort_keys=True), run_id) for item in raw_items])
             for table in tables:
-                self.db.execute(f"DELETE FROM {table} WHERE source_app = ?", (source_app,))
+                # Only this resource's rows: another resource may feed the same table.
+                self.db.execute(f"DELETE FROM {table} WHERE source_app = ? AND resource = ?", (source_app, resource))
                 table_rows = rows.get(table, [])
                 if not table_rows:
                     continue
-                columns = ["source_app", *table_rows[0].keys()]
+                columns = ["source_app", "resource", *table_rows[0].keys()]
                 sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})"
-                self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
+                self.db.executemany(sql, [(source_app, resource, *r.values()) for r in table_rows])
 
     def append_resource(self, run_id: int, source_app: str, resource: str, tables: tuple[str, ...],
                         raw_items: list[dict], rows: dict[str, list[dict]]) -> int:
@@ -89,10 +99,10 @@ class Store:
                 table_rows = rows.get(table, [])
                 if not table_rows:
                     continue
-                columns = ["source_app", *table_rows[0].keys()]
+                columns = ["source_app", "resource", *table_rows[0].keys()]
                 sql = (f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) "
                        f"VALUES ({', '.join('?' * len(columns))})")
-                self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
+                self.db.executemany(sql, [(source_app, resource, *r.values()) for r in table_rows])
         return new_count
 
     def newest(self, source_app: str, table: str, column: str) -> str | None:

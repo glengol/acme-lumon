@@ -2,6 +2,12 @@
 --
 -- Every entity table is keyed on (source_app, external_id), so a second app
 -- writes into the same tables with its own source_app value and no schema change.
+-- Each row also records the `resource` that wrote it, so two resources of one
+-- app can feed the same table (e.g. people and service accounts into identities)
+-- and refreshing one never deletes the other's rows.
+-- Connectors translate their own vocabulary into the neutral values noted on
+-- each column (identity kind: human | service; tool kind: app_connection |
+-- outbound_url), so the views and queries never mention any one app's terms.
 --
 -- Refresh rules:
 --   * Snapshot resources (users, groups, agents, connections) are fetched
@@ -49,6 +55,7 @@ CREATE TABLE IF NOT EXISTS raw_records (
 
 CREATE TABLE IF NOT EXISTS identities (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     external_id   TEXT NOT NULL,
     display_name  TEXT,
     login         TEXT,
@@ -64,6 +71,7 @@ CREATE TABLE IF NOT EXISTS identities (
 
 CREATE TABLE IF NOT EXISTS groups (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     external_id   TEXT NOT NULL,
     name          TEXT,
     PRIMARY KEY (source_app, external_id)
@@ -72,6 +80,7 @@ CREATE TABLE IF NOT EXISTS groups (
 -- A member is an identity ('user') or another group ('group').
 CREATE TABLE IF NOT EXISTS group_members (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     group_id      TEXT NOT NULL,
     member_type   TEXT NOT NULL,          -- user | group
     member_id     TEXT NOT NULL,
@@ -80,6 +89,7 @@ CREATE TABLE IF NOT EXISTS group_members (
 
 CREATE TABLE IF NOT EXISTS agents (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     external_id   TEXT NOT NULL,
     name          TEXT,
     owner_id      TEXT,                   -- identity external_id, NULL if none
@@ -91,11 +101,13 @@ CREATE TABLE IF NOT EXISTS agents (
 -- What an agent can reach. One row per tool.
 CREATE TABLE IF NOT EXISTS agent_tools (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     agent_id      TEXT NOT NULL,
     tool_id       TEXT NOT NULL,
-    kind          TEXT,                   -- saas_connector | http | ...
-    target        TEXT,                   -- app name, or URL for http
-    target_host   TEXT,                   -- lowercased URL host for http, NULL otherwise
+    kind          TEXT,                   -- neutral: app_connection | outbound_url | other (as received)
+    kind_raw      TEXT,                   -- the source app's own word, e.g. Lumen's saas_connector / http
+    target        TEXT,                   -- app name, or URL for outbound_url
+    target_host   TEXT,                   -- lowercased URL host for outbound_url, NULL otherwise
     connection_id TEXT,                   -- NULL when not backed by a stored connection
     scopes        TEXT,                   -- JSON array
     PRIMARY KEY (source_app, agent_id, tool_id)
@@ -104,6 +116,7 @@ CREATE TABLE IF NOT EXISTS agent_tools (
 -- Stored credentials an agent uses, and who approved them.
 CREATE TABLE IF NOT EXISTS connections (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     external_id   TEXT NOT NULL,
     name          TEXT,
     app           TEXT,
@@ -116,6 +129,7 @@ CREATE TABLE IF NOT EXISTS connections (
 -- Activity log (logins, tool invocations, grants).
 CREATE TABLE IF NOT EXISTS events (
     source_app    TEXT NOT NULL,
+    resource      TEXT NOT NULL,          -- which resource (endpoint) wrote this row
     external_id   TEXT NOT NULL,
     occurred_at   TEXT,
     action        TEXT,

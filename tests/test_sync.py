@@ -239,10 +239,10 @@ class SyncTest(unittest.TestCase):
         """In SQL, 'x' || NULL is NULL. One missing field must not empty a whole answer cell."""
         self.sync()
         db = self.store.db
-        db.execute("INSERT INTO connections (source_app, external_id, app, authorized_by, scopes) "
-                   "VALUES ('lumen', 'c-1', 'payroll', 'u-2', '[]')")
-        db.execute("INSERT INTO agent_tools (source_app, agent_id, tool_id, kind, target, connection_id, scopes) "
-                   "VALUES ('lumen', 'a-1', 't-2', 'saas_connector', 'payroll', 'c-1', '[]')")
+        db.execute("INSERT INTO connections (source_app, resource, external_id, app, authorized_by, scopes) "
+                   "VALUES ('lumen', 'connections', 'c-1', 'payroll', 'u-2', '[]')")
+        db.execute("INSERT INTO agent_tools (source_app, resource, agent_id, tool_id, kind, target, connection_id, scopes) "
+                   "VALUES ('lumen', 'agents', 'a-1', 't-2', 'app_connection', 'payroll', 'c-1', '[]')")
         db.execute("UPDATE identities SET status = NULL, status_raw = NULL WHERE external_id = 'u-2'")
         db.execute("UPDATE agents SET owner_id = 'u-missing' WHERE external_id = 'a-1'")
         for name in ("q1_agents_without_living_owner.sql", "q2_sensitive_or_external_paths.sql"):
@@ -273,8 +273,8 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(statuses, {"active"})
         mfa = {r[0] for r in self.store.db.execute("SELECT mfa_enabled FROM identities")}
         self.assertEqual(mfa, {None})  # field absent -> unknown, not false
-        host = self.store.db.execute("SELECT target_host FROM agent_tools").fetchone()[0]
-        self.assertEqual(host, "hooks.example.net")
+        row = self.store.db.execute("SELECT kind, kind_raw, target_host FROM agent_tools").fetchone()
+        self.assertEqual(tuple(row), ("outbound_url", "http", "hooks.example.net"))  # Lumen word -> neutral
 
 
 if __name__ == "__main__":

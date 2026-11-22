@@ -1,7 +1,10 @@
 """Command line entry point.
 
-    python3 -m lumen_sync sync      pull from Lumen into SQLite, print coverage
+    python3 -m lumen_sync sync      pull from the source app into SQLite, print coverage
     python3 -m lumen_sync report    answer the questions from the database
+
+The source app is chosen with --app (default: lumen). Its address and token
+come from <APP>_BASE_URL and <APP>_TOKEN, e.g. LUMEN_BASE_URL / LUMEN_TOKEN.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .connectors.lumen import LumenConnector
+from .connectors import CONNECTORS
 from .http import HttpClient
 from .report import print_report
 from .runner import print_coverage, run_sync
@@ -25,6 +28,7 @@ DEFAULT_CONFIG = Path(__file__).with_name("config.json")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lumen_sync")
     parser.add_argument("command", choices=["sync", "report"])
+    parser.add_argument("--app", default="lumen", choices=sorted(CONNECTORS), help="source app (default: lumen)")
     parser.add_argument("--db", default=os.environ.get("LUMEN_DB", "lumen.db"), help="SQLite file (default: lumen.db)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="policy config JSON")
     args = parser.parse_args(argv)
@@ -41,9 +45,11 @@ def main(argv: list[str] | None = None) -> int:
             store.close()
         return 0
 
-    base_url = os.environ.get("LUMEN_BASE_URL")
-    token = os.environ.get("LUMEN_TOKEN")
-    missing = [name for name, value in (("LUMEN_BASE_URL", base_url), ("LUMEN_TOKEN", token)) if not value]
+    prefix = args.app.upper()
+    url_var, token_var = f"{prefix}_BASE_URL", f"{prefix}_TOKEN"
+    base_url = os.environ.get(url_var)
+    token = os.environ.get(token_var)
+    missing = [name for name, value in ((url_var, base_url), (token_var, token)) if not value]
     if missing:
         print(f"error: set {' and '.join(missing)} in the environment", file=sys.stderr)
         return 2
@@ -55,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(args.db)
     try:
         store.load_config(json.loads(Path(args.config).read_text()))
-        connector = LumenConnector(HttpClient(base_url, token))
+        connector = CONNECTORS[args.app](HttpClient(base_url, token))
         run_id = run_sync(connector, store, base_url)
         print_coverage(store, run_id)
         print(f"\nDatabase: {Path(args.db).resolve()}")

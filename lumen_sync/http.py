@@ -71,8 +71,10 @@ class HttpClient:
                     return self._parse(path, response.status, response.read())
             except urllib.error.HTTPError as exc:
                 if 300 <= exc.code < 400:
+                    exc.close()
                     raise ApiError(path, exc.code, f"redirect_refused (to {exc.headers.get('Location')})")
                 body = self._safe_json(exc.read())
+                exc.close()
                 last_error = ApiError(path, exc.code, body.get("error", exc.reason or "http_error"), body)
                 if exc.code != 429 and exc.code < 500:
                     raise last_error
