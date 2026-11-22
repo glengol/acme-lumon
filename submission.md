@@ -18,6 +18,7 @@ What I would change before running this for a real customer, most important firs
 | **Change history** | Each run replaces the previous copy | Keep snapshots, or a change log per entity, so "new agent", "owner changed" and "scope added" become alerts instead of silent updates. |
 | **Paging** | Stops at `total_pages`; aborts if it changes mid-fetch | Ask the vendor for cursor-based paging or a snapshot token. Add a page-size check to detect quiet truncation on the unpaginated endpoints. |
 | **Resilience** | Retries 5xx and network errors (honouring `Retry-After`); never retries other 4xx; stops after a 401; refuses redirects | Check `/health` once before starting, and add a total time budget per run. |
+| **Reuse by a second app** | A resource replaces *all* rows of its tables for its app | If one app fills a table from two endpoints (for example people and service accounts both into `identities`), track which resource wrote each row and replace only that resource's rows. |
 | **Schema changes** | `CREATE TABLE IF NOT EXISTS`; a changed schema is not applied to an existing database | Versioned migrations. |
 | **Reporting date** | "Today" (2026-11-09) is written into the Q3 SQL, as the assignment fixes it | A parameter, defaulting to the time of the last successful sync. |
 | **API drift** | Unknown fields are kept in `raw_records` | Contract tests against the vendor API, plus alerts when new fields, new status values or new tool kinds appear. |
@@ -51,7 +52,7 @@ What I would change before running this for a real customer, most important firs
 
 Verification also caught two bugs in its code, both now fixed: the report claimed data was unusable after a failed run (it was intact), and the exit code was `0` even when nothing was collected.
 
-I also had the solution reviewed from a fresh clone by a second engineer using their own AI assistant, and fixed what held up. The most important: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late. Each fix is a separate commit with a test that breaks the old behaviour.
+I also had the solution reviewed from a fresh clone by a second engineer using their own AI assistant, and fixed what held up. The most important: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late. Each fix is a separate commit with a test that breaks the old behaviour. A final independent review of a fresh clone found that Q3 hid admins whose account was not active, and that malformed dates and missing references could fall out of the answers; those are fixed too, and the analysis rules now have their own tests.
 
 ---
 
@@ -120,6 +121,7 @@ SELECT p.agent_id,
        END                                                         AS why,
        COALESCE(p.tool_scopes, '[]')                               AS scopes,
        CASE WHEN p.connection_id IS NULL  THEN 'none on record (no stored connection)'
+            WHEN p.connection_ref IS NULL THEN 'unknown (connection ' || p.connection_id || ' not found)'
             WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
             WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
             ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
@@ -151,31 +153,50 @@ ORDER BY (p.agent_status = 'active') DESC, agent_combines DESC, p.agent_id, p.to
 
 - **Admins:** everyone in "AI Platform Admins", including through nested groups.
 - **MFA:** flagged unless confirmed on. A missing value is shown as "unknown", not "off".
-- **Stale:** no login since 2026-10-10 (30 days before 9 November 2026).
+- **Stale:** no login since 2026-10-10 (30 days before 9 November 2026), none recorded, or a login value that is not a readable timestamp. Days are counted by calendar date.
+- **Also listed:** admins whose account is not active, whose type is unknown, or who are not found in users. Holding admin rights in that state is itself a risk.
 
 ```sql
-SELECT a.external_id                                          AS user_id,
-       a.display_name                                         AS admin,
+WITH admins AS (
+    SELECT a.*,
+           CASE WHEN a.last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*'
+                 AND julianday(substr(a.last_login_at, 1, 10)) IS NOT NULL
+                THEN substr(a.last_login_at, 1, 10) END       AS login_date   -- NULL = missing or unreadable
+    FROM v_admins a
+    WHERE COALESCE(a.kind, '') <> 'service'
+)
+SELECT a.admin_id                                             AS user_id,
+       COALESCE(a.display_name, '-')                          AS admin,
+       COALESCE(a.status_raw, '-')                            AS status,
        a.admin_via                                            AS admin_via,
        CASE a.mfa_enabled WHEN 1 THEN 'on' WHEN 0 THEN 'off' ELSE 'unknown (not reported)' END AS mfa,
-       COALESCE(substr(a.last_login_at, 1, 10), 'never')      AS last_login,
-       CAST(julianday('2026-11-09') - julianday(substr(a.last_login_at, 1, 19)) AS INTEGER) AS days_since_login,
-       trim(CASE WHEN a.mfa_enabled IS NOT 1 THEN 'MFA not confirmed; ' ELSE '' END ||
-            CASE WHEN a.last_login_at IS NULL
-                   OR julianday(substr(a.last_login_at, 1, 19)) < julianday('2026-11-09', '-30 days')
-                 THEN 'no login in 30 days' ELSE '' END, '; ') AS reasons
-FROM v_admins a
-WHERE a.kind = 'human'
-  AND a.is_active = 1
-  AND (a.mfa_enabled IS NOT 1
-       OR a.last_login_at IS NULL
-       OR julianday(substr(a.last_login_at, 1, 19)) < julianday('2026-11-09', '-30 days'))
-ORDER BY a.external_id;
+       COALESCE(a.login_date, COALESCE(a.last_login_at, 'never')) AS last_login,
+       CAST(julianday('2026-11-09') - julianday(a.login_date) AS INTEGER) AS days_since_login,
+       trim(
+         CASE WHEN a.external_id IS NULL          THEN 'admin member not found in users; ' ELSE '' END ||
+         CASE WHEN a.external_id IS NOT NULL AND a.is_active = 0
+                                                  THEN 'account not active (' || COALESCE(a.status_raw, 'no status') || '); ' ELSE '' END ||
+         CASE WHEN a.external_id IS NOT NULL AND a.kind IS NULL
+                                                  THEN 'account type unknown; ' ELSE '' END ||
+         CASE WHEN a.mfa_enabled IS NOT 1          THEN 'MFA not confirmed; ' ELSE '' END ||
+         CASE WHEN a.last_login_at IS NULL         THEN 'no login recorded'
+              WHEN a.login_date IS NULL            THEN 'login date unreadable'
+              WHEN a.login_date < '2026-10-10'     THEN 'no login in 30 days'
+              ELSE '' END,
+         '; ')                                                AS reasons
+FROM admins a
+WHERE a.external_id IS NULL
+   OR a.is_active = 0
+   OR a.kind IS NULL
+   OR a.mfa_enabled IS NOT 1
+   OR a.login_date IS NULL
+   OR a.login_date < '2026-10-10'
+ORDER BY a.admin_id;
 ```
 
-| user_id | admin | admin_via | mfa | last_login | days_since_login | reasons |
-|---|---|---|---|---|---|---|
-| u-1002 | James Miller | AI Platform Admins > IT | unknown (not reported) | 2026-09-10 | 59 | MFA not confirmed; no login in 30 days |
+| user_id | admin | status | admin_via | mfa | last_login | days_since_login | reasons |
+|---|---|---|---|---|---|---|---|
+| u-1002 | James Miller | ACTIVE | AI Platform Admins > IT | unknown (not reported) | 2026-09-10 | 60 | MFA not confirmed; no login in 30 days |
 
 Not in Q3, because it is not human: the service account **svc-lumen (u-1006)** is also a direct admin, with MFA not reported. See the customer summary, finding 5.
 
@@ -211,9 +232,9 @@ Not in Q3, because it is not human: the service account **svc-lumen (u-1006)** i
 **TL;DR**
 1. **Act today:** "Finance Copilot" reads payroll and can send data to an outside address. Its owner and the person who approved its payroll access have both been deprovisioned, and it was used on 8 November. Disable it or remove the outside webhook.
 2. **We cannot see what agents did.** The integration token is missing `audit.read`. Please grant it so we can check whether any data left Acme.
-3. **Review next:** an ownerless agent reading Google Drive through a contractor's approval, and an admin (James Miller) with unconfirmed MFA and no login for 59 days.
+3. **Review next:** an ownerless agent reading Google Drive through a contractor's approval, and an admin (James Miller) with unconfirmed MFA and no login for 60 days.
 
-### Finding 1 (critical): an ownerless agent can read payroll data and send data to an outside address
+### Finding 1 (critical): an agent whose owner has left can read payroll data and send data to an outside address
 
 **Finance Copilot** (`a-201`) has two tools:
 - it reads **payroll** (`employees.read`) through the connection `payroll-export` (`c-302`);
@@ -255,12 +276,12 @@ We cannot yet see whether payroll data was actually sent to the outside address,
 1. Grant `audit.read` to the integration token.
 2. Ask the Lumen vendor to confirm whether `X-Lumen-Scopes` is trusted, and to fix it if so. Until then, treat every Lumen token as able to read the audit log.
 
-### Finding 4 (high): an admin with unconfirmed MFA who has not logged in for 59 days
+### Finding 4 (high): an admin with unconfirmed MFA who has not logged in for 60 days
 
 **James Miller (`u-1002`)**:
 - is an admin, **only through the IT group**, which is nested inside "AI Platform Admins" (easy to miss in a manual review);
 - **MFA is not reported** for this account;
-- **last logged in on 10 September 2026** (59 days before 9 November);
+- **last logged in on 10 September 2026** (60 days before 9 November);
 - is the **only active employee who is not in the "Everyone" group**. This suggests the account was created outside the normal process. We have not confirmed this.
 
 **Action:**
@@ -300,7 +321,7 @@ These tools are not backed by a stored connection, so Lumen records nobody as ap
 | Item | Action |
 | --- | --- |
 | MFA not reported for John Doe (`u-1001`) and Jordan Blake (`u-1011`) | Confirm MFA |
-| Taylor Reed (`u-1012`): active, no login for 85 days | Confirm the account is still needed |
+| Taylor Reed (`u-1012`): active, no login for 86 days | Confirm the account is still needed |
 | "Everyone" has 8 of 12 accounts. The two deprovisioned users and svc-lumen are expected to be missing; James Miller (finding 4) is not | Don't treat "Everyone" as all staff, and check that policies applied through it cover everyone they should |
 | The contractor account `u-1005` is in "Everyone" | Check what "Everyone" grants, since it reaches a non-employee |
 | User status arrives in mixed casing (`ACTIVE`, `active`) | None for us; worth knowing for other tools that read it |

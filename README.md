@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 13 tests against a small fake API, so the mock does not need to be running.
+These are 20 tests: 13 run the collector against a small fake API, and 7 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases. The mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -124,7 +124,8 @@ The program has three stages. Each stage only talks to the next one.
 | `lumen_sync/views.sql` | The shared analysis logic |
 | `lumen_sync/config.json` | Acme's policy: sensitive apps, Acme domains, admin groups |
 | `queries/q1…q3.sql` | One file per question |
-| `tests/test_sync.py` | Automated tests |
+| `tests/test_sync.py` | Collector tests against a fake API |
+| `tests/test_analysis.py` | Tests for the analysis rules and queries |
 | `PLAN.md` | The plan, the API and data findings, and every decision with its reason |
 | `submission.md` | Production notes, AI tool use, answers, and the customer summary |
 

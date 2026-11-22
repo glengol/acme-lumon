@@ -77,7 +77,7 @@ SQL for questions 1–3, run against the database, with the results kept for `su
 - Results match the expected answers from step 3:
   - Q1: a-201 Finance Copilot (owner deprovisioned), a-202 Shadow Research Bot (no owner).
   - Q2: 5 paths. a-201 holds both a payroll read and an external webhook (`agent_combines = YES`).
-  - Q3: u-1002 James Miller (MFA unknown, 59 days, admin via the nested IT group).
+  - Q3: u-1002 James Miller (MFA unknown, 60 days, admin via the nested IT group).
 
 ## Step 7: Verify
 - Run the program twice and compare the row counts.
@@ -92,7 +92,7 @@ SQL for questions 1–3, run against the database, with the results kept for `su
 | API unreachable after a good run | All resources `network_error`, explained in coverage; existing data untouched; exit code 1 |
 | Missing env vars | Clear error, exit code 2 |
 | Answers vs raw responses | Q1–Q3 match the independent hand analysis from step 2 |
-| Automated | `python3 -m unittest -v`: 13 tests against a fake API with invented data (paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
+| Automated | `python3 -m unittest -v`: 20 tests. 13 run the collector against a fake API with invented data, and 7 check the analysis rules on hand-built databases (nested groups and cycles, every Q1/Q3 reason, sensitive/external rules, Q2 authorizers). The collector tests cover: paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
 
 Problems found and fixed during verification:
 1. **The report claimed data was unusable after a failed run, even though the previous copy was intact.** It now prints per-resource freshness: when each resource was last collected, and whether its latest attempt failed (STALE / NEVER COLLECTED).
@@ -178,27 +178,27 @@ Matches `API.md` (not paginated).
 _(filled in during step 2)_
 
 ### Users (12 records, 12 unique ids)
-| id | name | type | status | mfa_enabled | last login | days before 2026-11-09 | email domain |
+| id | name | type | status | mfa_enabled | last login | days before 2026-11-09 (by date) | email domain |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| u-1001 | John Doe | human | ACTIVE | *missing* | 2026-11-01 | 7 | acme.com |
-| u-1002 | James Miller | human | ACTIVE | *missing* | 2026-09-10 | **59** | acme.com |
-| u-1003 | Maya Shah | human | **`active`** | true | 2026-11-08 | 0 | acme.com |
-| u-1004 | Mary Johnson | human | DEPROVISIONED | true | 2026-04-15 | 207 | acme.com |
-| u-1005 | Sam Okonkwo | human | ACTIVE | true | 2026-11-07 | 1 | **partner.example** |
+| u-1001 | John Doe | human | ACTIVE | *missing* | 2026-11-01 | 8 | acme.com |
+| u-1002 | James Miller | human | ACTIVE | *missing* | 2026-09-10 | **60** | acme.com |
+| u-1003 | Maya Shah | human | **`active`** | true | 2026-11-08 | 1 | acme.com |
+| u-1004 | Mary Johnson | human | DEPROVISIONED | true | 2026-04-15 | 208 | acme.com |
+| u-1005 | Sam Okonkwo | human | ACTIVE | true | 2026-11-07 | 2 | **partner.example** |
 | u-1006 | svc-lumen | **service** | ACTIVE | *missing* | 2026-11-09 01:00 | **after "today"** (see D9) | *no email* |
-| u-1007 | Alex Carter | human | ACTIVE | true | 2026-11-08 | 0 | acme.com |
-| u-1008 | Pat Morgan | human | ACTIVE | true | 2026-11-05 | 3 | acme.com |
-| u-1009 | Chris Bennett | human | ACTIVE | true | 2026-11-06 | 2 | acme.com |
-| u-1010 | Riley Brooks | human | DEPROVISIONED | true | 2026-01-10 | 302 | acme.com |
-| u-1011 | Jordan Blake | human | ACTIVE | *missing* | 2026-11-02 | 6 | acme.com |
-| u-1012 | Taylor Reed | human | ACTIVE | true | 2026-08-15 | **85** | acme.com |
+| u-1007 | Alex Carter | human | ACTIVE | true | 2026-11-08 | 1 | acme.com |
+| u-1008 | Pat Morgan | human | ACTIVE | true | 2026-11-05 | 4 | acme.com |
+| u-1009 | Chris Bennett | human | ACTIVE | true | 2026-11-06 | 3 | acme.com |
+| u-1010 | Riley Brooks | human | DEPROVISIONED | true | 2026-01-10 | 303 | acme.com |
+| u-1011 | Jordan Blake | human | ACTIVE | *missing* | 2026-11-02 | 7 | acme.com |
+| u-1012 | Taylor Reed | human | ACTIVE | true | 2026-08-15 | **86** | acme.com |
 
 Observations:
 - **Status casing is inconsistent:** `ACTIVE` ×9, `active` ×1, `DEPROVISIONED` ×2. Status comparisons must ignore case. The meaning of each value is not documented.
 - **`mfa_enabled` is missing for 4 users** (u-1001, u-1002, u-1006, u-1011). The field is never `false`: it is either `true` or absent. Absent means MFA status is unknown, not off.
 - **Email is missing for the one service account** (as `API.md` says it may be).
 - **One external user:** u-1005 on `partner.example`. All other emails are `acme.com`.
-- **Two ACTIVE humans have not logged in for over 30 days:** u-1002 (59 days) and u-1012 (85 days). Whether they matter for question 3 depends on whether they are admins (see Groups).
+- **Two ACTIVE humans have not logged in for over 30 days:** u-1002 (60 days) and u-1012 (86 days). Whether they matter for question 3 depends on whether they are admins (see Groups).
 - **Two users are DEPROVISIONED** but still returned by the API. They still appear as owners and approvers elsewhere (see Connection approvers).
 
 ### Groups (4 groups, all member references resolve)
@@ -215,13 +215,13 @@ Observations:
 - **Effective admins (3):**
   - u-1006 svc-lumen: **service account**, MFA field missing, last login 2026-11-09 01:00, an hour after the "today" cut-off (see D9).
   - u-1009 Chris Bennett: human, MFA true, logged in 2 days ago.
-  - u-1002 James Miller: human, admin **only through nesting**, MFA field missing, last login **59 days** ago.
+  - u-1002 James Miller: human, admin **only through nesting**, MFA field missing, last login **60 days** ago.
 - **"Everyone" is not everyone:** 12 users in total, 8 in "Everyone". The 4 not in it:
   - u-1004 Mary Johnson and u-1010 Riley Brooks: DEPROVISIONED. Expected, and consistent with the status.
   - u-1006 svc-lumen: service account. Likely expected, since it is not an employee.
   - **u-1002 James Miller: active human, the only active employee not in "Everyone". Unexplained.**
 
-  James Miller is also the admin whose MFA is unknown, who last logged in 59 days ago, and who is an admin only through the nested IT group. Together this suggests an account outside normal provisioning that holds admin rights (an inference, not confirmed). Any policy Acme applies through "Everyone" may not cover him. → Ask Acme how this account was created, whether it is still needed, and whether "Everyone"-scoped policies cover him.
+  James Miller is also the admin whose MFA is unknown, who last logged in 60 days ago, and who is an admin only through the nested IT group. Together this suggests an account outside normal provisioning that holds admin rights (an inference, not confirmed). Any policy Acme applies through "Everyone" may not cover him. → Ask Acme how this account was created, whether it is still needed, and whether "Everyone"-scoped policies cover him.
 - **Only DEPROVISIONED users are in no group** (u-1004, u-1010), which is consistent with their status.
 - **The external user u-1005 is in Everyone**, so anything granted to "Everyone" also reaches a contractor.
 
@@ -312,7 +312,7 @@ _(filled in during step 3; decisions made earlier are recorded here as they happ
 ### D7: Admin (question 3)
 - **Seen:** no admin field in the API. One group is named "AI Platform Admins", and it contains a nested group.
 - **Decision:** admins are the **effective members** (expanded recursively, with a cycle guard) of a **config list of admin groups**, starting with `["AI Platform Admins"]`. Each config entry matches a group **by id, or by name ignoring case and surrounding spaces**. An entry that matches no group is reported as a WARNING, never silently treated as "no admins". `admin_via` shows the shortest path.
-- Question 3 asks for **human** admins only. Service-account admins are listed separately as their own finding.
+- Question 3 asks for **human** admins only. Service-account admins are listed separately as their own finding. An admin whose account is not active, whose type is unknown, or whose id is not a known user is **kept** in Q3 with that as the reason (D2: unknown values surface as risk).
 - → Confirm with Acme which groups or roles grant admin rights.
 
 ### D8: Missing MFA (question 3)
@@ -320,6 +320,6 @@ _(filled in during step 3; decisions made earlier are recorded here as they happ
 - **Decision:** an admin is flagged if `mfa_enabled` is not `true`. The output distinguishes **`off`** (false) from **`unknown`** (absent), and the summary says "MFA not confirmed", never "MFA off", for absent values.
 
 ### D9: Not logged in for 30 days (question 3)
-- **Decision:** "today" is **2026-11-09T00:00:00Z** (from the assignment). Stale means `last_login_at` is before **2026-10-10T00:00:00Z**, or is null.
+- **Decision:** "today" is **2026-11-09** (from the assignment). Days are counted by calendar date. Stale means the last login date is before **2026-10-10**, is null, or is not a readable ISO-8601 timestamp (if in doubt, flag it).
 - **Caveat:** the only login data we have is `last_login_at` on the user record. The audit log, which holds login events, is blocked (D1), so we cannot cross-check it.
 - **Edge case:** svc-lumen's last login (2026-11-09 01:00) is *after* the 00:00 cut-off. It does not change any answer (it is recent, and Q3 is humans only), but it shows the data is newer than the assignment's "today". We treat "today" as the reporting date, not as the time the data was pulled.
