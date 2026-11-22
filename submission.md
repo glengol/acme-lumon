@@ -18,7 +18,7 @@ What I would change before running this for a real customer, most important firs
 | **Change history** | Each run replaces the previous copy | Keep snapshots, or a change log per entity, so "new agent", "owner changed" and "scope added" become alerts instead of silent updates. |
 | **Paging** | Stops at `total_pages`; aborts if it changes mid-fetch | Ask the vendor for cursor-based paging or a snapshot token. Add a page-size check to detect quiet truncation on the unpaginated endpoints. |
 | **Resilience** | Retries 5xx and network errors (honouring `Retry-After`); never retries other 4xx; stops after a 401; refuses redirects | Check `/health` once before starting, and add a total time budget per run. |
-| **Reuse by a second app** | A resource replaces *all* rows of its tables for its app | If one app fills a table from two endpoints (for example people and service accounts both into `identities`), track which resource wrote each row and replace only that resource's rows. |
+| **Reuse by a second app** | Connector registry, neutral vocabulary, per-resource replace and cross-app identity linking; proven by a test with an invented second app | A real second connector against a real API; per-tenant policy tables; show `source_app` in the answers once there is more than one app |
 | **Schema changes** | `CREATE TABLE IF NOT EXISTS`; a changed schema is not applied to an existing database | Versioned migrations. |
 | **Reporting date** | "Today" (2026-11-09) is written into the Q3 SQL, as the assignment fixes it | A parameter, defaulting to the time of the last successful sync. |
 | **API drift** | Unknown fields are kept in `raw_records` | Contract tests against the vendor API, plus alerts when new fields, new status values or new tool kinds appear. |
@@ -105,7 +105,7 @@ ORDER BY (a.status = 'active') DESC, a.external_id;
 ### Q2. Which agents can reach a sensitive system or send data outside Acme, and who authorized that path?
 
 - **Sensitive:** any app not explicitly cleared in `config.json` ("if in doubt, sensitive"), or any write or admin scope.
-- **External:** an HTTP tool whose host is not `acme.com` or a subdomain of it.
+- **External:** a tool that calls a URL (Lumen's `http` kind, stored as the neutral `outbound_url`) whose host is not `acme.com` or a subdomain of it.
 - **Authorizer:** the connection's `authorized_by`. If the tool has no stored connection, it is "none on record"; it is never filled in with the owner.
 - **`agent_combines = YES`** marks an agent that holds both a sensitive read and an external send.
 
@@ -119,7 +119,7 @@ SELECT p.agent_id,
             WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
             ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
        END                                                         AS owner,
-       COALESCE(CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END, '-') AS reaches,
+       COALESCE(CASE WHEN p.tool_kind = 'outbound_url' THEN p.target ELSE p.app END, '-') AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
             ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
        END                                                         AS why,

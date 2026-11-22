@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 20 tests: 13 run the collector against a small fake API, and 7 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases. The mock does not need to be running.
+These are 23 tests: 13 run the collector against a small fake API, 7 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases, and 3 prove a second app reuses the same tables, views and queries. The mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -80,8 +80,9 @@ sqlite> .read queries/q1_agents_without_living_owner.sql
 
 | Setting | How | Default |
 | --- | --- | --- |
-| API address | `LUMEN_BASE_URL` (required) | – |
-| API token | `LUMEN_TOKEN` (required) | – |
+| Source app | `--app name` | `lumen` |
+| API address | `<APP>_BASE_URL`, e.g. `LUMEN_BASE_URL` (required) | – |
+| API token | `<APP>_TOKEN`, e.g. `LUMEN_TOKEN` (required) | – |
 | Database file | `--db path` or `LUMEN_DB` | `lumen.db` |
 | Policy config | `--config path` | `lumen_sync/config.json` |
 
@@ -126,6 +127,7 @@ The program has three stages. Each stage only talks to the next one.
 | `queries/q1…q3.sql` | One file per question |
 | `tests/test_sync.py` | Collector tests against a fake API |
 | `tests/test_analysis.py` | Tests for the analysis rules and queries |
+| `tests/test_reuse.py` | A second, invented app ("Nimbus") run through the same code |
 | `PLAN.md` | The plan, the API and data findings, and every decision with its reason |
 | `submission.md` | Production notes, AI tool use, answers, and the customer summary |
 
@@ -212,9 +214,22 @@ The analysis rules are data in `lumen_sync/config.json`, not code:
 
 ## 7. Adding a second app
 
-Only the first stage is Lumen-specific. To add another platform:
+Only the first stage is app-specific. To add another platform:
 
 1. Add `lumen_sync/connectors/<app>.py` with a class that lists its resources (name, tables, fetch, map to rows), like `LumenConnector`.
-2. Register it in `__main__.py`.
+2. Map the app's own words onto the neutral ones in `connectors/base.py`: identity kind `human` / `service`, tool kind `app_connection` / `outbound_url`. Keep the original in `kind_raw`.
+3. Add one line to `CONNECTORS` in `lumen_sync/connectors/__init__.py`, then run `python3 -m lumen_sync sync --app <app>` with `<APP>_BASE_URL` and `<APP>_TOKEN` set.
+4. Add the app's admin group names under `admin_groups` in `config.json`.
 
-The tables, the views, the queries, the coverage report and the refresh logic stay the same. Every row carries a `source_app` column, so several apps can share one database.
+The tables, views, queries, coverage report and refresh logic stay the same:
+
+| What makes it reusable | How |
+| --- | --- |
+| Rows from many apps in one database | Every row carries `source_app`; ids are unique per app |
+| Several endpoints feeding one table | Every row carries the `resource` that wrote it, and a refresh replaces only that resource's rows |
+| No app's vocabulary in the analysis | Connectors translate into neutral kinds; the views never mention Lumen's terms |
+| The same person in several apps | `v_person_accounts` links accounts by email |
+
+`tests/test_reuse.py` proves it. An invented app with different field names, tool types and two endpoints feeding `identities` runs through the unchanged runner, views and Q1–Q3, in the same database as another app.
+
+If the schema changes, an existing database is refused with a clear message (delete it and run `sync` again). There are no migrations yet.
