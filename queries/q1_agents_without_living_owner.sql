@@ -3,9 +3,11 @@
 -- A living owner (Decision D3) is an identity that exists, is active
 -- (case-insensitive), and is human. Each agent that fails gets the reason.
 -- Last-used time of the agent's connections shows whether it is still running.
+-- Disabled agents are listed too (they can be re-enabled), but active ones sort first.
 
 SELECT a.external_id                                   AS agent_id,
        a.name                                          AS agent,
+       COALESCE(a.status_raw, '-')                     AS agent_status,
        COALESCE(a.owner_id, '-')                       AS owner_id,
        COALESCE(o.display_name, '-')                   AS owner,
        CASE
@@ -27,4 +29,4 @@ WHERE a.owner_id IS NULL
    OR o.external_id IS NULL
    OR o.is_active = 0
    OR o.kind <> 'human'
-ORDER BY a.external_id;
+ORDER BY (a.status = 'active') DESC, a.external_id;

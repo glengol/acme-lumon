@@ -9,9 +9,11 @@
 --               has no stored connection. Never filled in with the owner.
 -- `agent_combines` flags an agent that holds BOTH a sensitive read and an
 -- external send: a path for sensitive data to leave the company.
+-- Disabled agents are listed too (they can be re-enabled), but active ones sort first.
 
 SELECT p.agent_id,
        p.agent_name                                                AS agent,
+       COALESCE(p.agent_status, '-')                               AS agent_status,
        COALESCE(p.owner_name || ' (' || p.owner_status || ')', 'no owner')  AS owner,
        CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || p.app
@@ -31,4 +33,4 @@ SELECT p.agent_id,
             THEN 'YES' ELSE '' END                                 AS agent_combines
 FROM v_agent_paths p
 WHERE p.is_sensitive = 1 OR p.is_external = 1
-ORDER BY agent_combines DESC, p.agent_id, p.tool_id;
+ORDER BY (p.agent_status = 'active') DESC, agent_combines DESC, p.agent_id, p.tool_id;
