@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 6 tests against a small fake API, so the mock does not need to be running.
+These are 7 tests against a small fake API, so the mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -140,7 +140,7 @@ The program has three stages. Each stage only talks to the next one.
 | `groups`, `group_members` | Groups. A member is a user or another group. | `/v1/groups` |
 | `agents`, `agent_tools` | AI agents and each tool they can use | `/v1/agents` |
 | `connections` | Stored app logins, and who approved them | `/v1/connections` |
-| `events` | Activity log (empty until access is granted) | `/v1/audit` |
+| `events` | Activity log, append-only (empty until access is granted) | `/v1/audit` |
 | `raw_records` | Every object exactly as received | all |
 | `sync_runs`, `coverage` | Each run, and per endpoint: collected or not, and why | – |
 | `app_classification`, `internal_domains`, `admin_groups` | Acme's policy, loaded from `config.json` | – |
@@ -167,6 +167,7 @@ The program has three stages. Each stage only talks to the next one.
 - Each endpoint is fetched **completely** first. Only then are its rows replaced, **in one transaction**.
 - Running twice gives identical data, so there are no duplicates.
 - If an endpoint fails, its previous data is **kept**, and the report marks it **STALE**.
+- **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 10-minute overlap) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept.
 
 ---
 

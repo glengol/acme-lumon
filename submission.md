@@ -14,7 +14,7 @@ What I would change before running this for a real customer, most important firs
 | --- | --- | --- |
 | **Token** | Read from an environment variable | Stored in a secrets manager and rotated. Ask the vendor for a read-only, least-privilege integration token that includes `audit.read`. |
 | **Scheduling and alerting** | Run by hand | Run on a schedule (for example hourly). Alert on exit code `1` (nothing collected), and on any resource that stays STALE longer than a set time. |
-| **Audit log** | Fetched in full, once access is granted | Incremental: store the newest event time and call `/v1/audit?since=<last seen>` with a small overlap. Events are append-only, so upsert by id and never delete. |
+| **Audit log** | Ready but never run against Lumen (access denied). Incremental (`since` = newest stored event minus 10 minutes), append-only, follows paging if present; tested against a fake API | Run it against Lumen as soon as `audit.read` is granted, and confirm Lumen's retention window, paging and event detail before relying on it |
 | **Change history** | Each run replaces the previous copy | Keep snapshots, or a change log per entity, so "new agent", "owner changed" and "scope added" become alerts instead of silent updates. |
 | **Paging** | Stops at `total_pages`; aborts if it changes mid-fetch | Ask the vendor for cursor-based paging or a snapshot token. Add a page-size check to detect quiet truncation on the unpaginated endpoints. |
 | **Resilience** | Retries 5xx and network errors; does not retry 4xx | Check `/health` once before starting, honour `Retry-After` on 429, and add a total time budget per run. |
@@ -62,6 +62,7 @@ A living owner is a user who exists, is active (ignoring case) and is human.
 ```sql
 SELECT a.external_id                                   AS agent_id,
        a.name                                          AS agent,
+       COALESCE(a.status_raw, '-')                     AS agent_status,
        COALESCE(a.owner_id, '-')                       AS owner_id,
        COALESCE(o.display_name, '-')                   AS owner,
        CASE
@@ -83,13 +84,13 @@ WHERE a.owner_id IS NULL
    OR o.external_id IS NULL
    OR o.is_active = 0
    OR o.kind <> 'human'
-ORDER BY a.external_id;
+ORDER BY (a.status = 'active') DESC, a.external_id;
 ```
 
-| agent_id | agent | owner_id | owner | reason | reaches | last_used_at |
-|---|---|---|---|---|---|---|
-| a-201 | Finance Copilot | u-1004 | Mary Johnson | owner not active (DEPROVISIONED) | payroll, hooks.vendor.example | 2026-11-08T14:05:00Z |
-| a-202 | Shadow Research Bot | - | - | no owner set | google-drive | 2026-11-07T09:12:00Z |
+| agent_id | agent | agent_status | owner_id | owner | reason | reaches | last_used_at |
+|---|---|---|---|---|---|---|---|
+| a-201 | Finance Copilot | active | u-1004 | Mary Johnson | owner not active (DEPROVISIONED) | payroll, hooks.vendor.example | 2026-11-08T14:05:00Z |
+| a-202 | Shadow Research Bot | active | - | - | no owner set | google-drive | 2026-11-07T09:12:00Z |
 
 ### Q2. Which agents can reach a sensitive system or send data outside Acme, and who authorized that path?
 
@@ -101,6 +102,7 @@ ORDER BY a.external_id;
 ```sql
 SELECT p.agent_id,
        p.agent_name                                                AS agent,
+       COALESCE(p.agent_status, '-')                               AS agent_status,
        COALESCE(p.owner_name || ' (' || p.owner_status || ')', 'no owner')  AS owner,
        CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || p.app
@@ -120,16 +122,16 @@ SELECT p.agent_id,
             THEN 'YES' ELSE '' END                                 AS agent_combines
 FROM v_agent_paths p
 WHERE p.is_sensitive = 1 OR p.is_external = 1
-ORDER BY agent_combines DESC, p.agent_id, p.tool_id;
+ORDER BY (p.agent_status = 'active') DESC, agent_combines DESC, p.agent_id, p.tool_id;
 ```
 
-| agent_id | agent | owner | reaches | why | scopes | authorized_by | last_used_at | agent_combines |
-|---|---|---|---|---|---|---|---|---|
-| a-201 | Finance Copilot | Mary Johnson (deprovisioned) | payroll | sensitive: payroll | ["employees.read"] | Mary Johnson (u-1004, deprovisioned) | 2026-11-08T14:05:00Z | YES |
-| a-201 | Finance Copilot | Mary Johnson (deprovisioned) | https://hooks.vendor.example/payroll | external: hooks.vendor.example | [] | none on record (no stored connection) | - | YES |
-| a-202 | Shadow Research Bot | no owner | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, active, external: partner.example) | 2026-11-07T09:12:00Z | |
-| a-205 | Calendar Assistant | Chris Bennett (active) | calendar | sensitive: calendar | ["read"] | Chris Bennett (u-1009, active) | 2026-11-06T08:45:00Z | |
-| a-206 | Support Macros | Pat Morgan (active) | slack | sensitive: slack | ["read"] | Pat Morgan (u-1008, active) | 2026-11-05T14:10:00Z | |
+| agent_id | agent | agent_status | owner | reaches | why | scopes | authorized_by | last_used_at | agent_combines |
+|---|---|---|---|---|---|---|---|---|---|
+| a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | payroll | sensitive: payroll | ["employees.read"] | Mary Johnson (u-1004, deprovisioned) | 2026-11-08T14:05:00Z | YES |
+| a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | https://hooks.vendor.example/payroll | external: hooks.vendor.example | [] | none on record (no stored connection) | - | YES |
+| a-202 | Shadow Research Bot | active | no owner | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, active, external: partner.example) | 2026-11-07T09:12:00Z |  |
+| a-205 | Calendar Assistant | active | Chris Bennett (active) | calendar | sensitive: calendar | ["read"] | Chris Bennett (u-1009, active) | 2026-11-06T08:45:00Z |  |
+| a-206 | Support Macros | active | Pat Morgan (active) | slack | sensitive: slack | ["read"] | Pat Morgan (u-1008, active) | 2026-11-05T14:10:00Z |  |
 
 ### Q3. Which human admins are missing MFA or have not logged in for 30 days?
 
@@ -191,6 +193,11 @@ Not in Q3, because it is not human: the service account **svc-lumen (u-1006)** i
 > **Subject:** Lumen AI agents: first security review (data as of 9 November 2026)
 >
 > This summary can be forwarded to IT as is. Findings are ordered by importance. Each one says what we saw, why it matters and what to do.
+
+**TL;DR**
+1. **Act today:** "Finance Copilot" reads payroll and can send data to an outside address. Its owner and the person who approved its payroll access have both been deprovisioned, and it was used on 8 November. Disable it or remove the outside webhook.
+2. **We cannot see what agents did.** The integration token is missing `audit.read`. Please grant it so we can check whether any data left Acme.
+3. **Review next:** an ownerless agent reading Google Drive through a contractor's approval, and an admin (James Miller) with unconfirmed MFA and no login for 59 days.
 
 ### Finding 1 (critical): an ownerless agent can read payroll data and send data to an outside address
 
@@ -270,27 +277,19 @@ These tools are not backed by a stored connection, so Lumen records nobody as ap
 
 **Action:** confirm who approved each one. For the wiki tools, also confirm how they authenticate.
 
-### Finding 7 (low): other agents reading sensitive apps, with healthy ownership
+### Finding 7 (low): two more agents read sensitive apps, with healthy ownership
 
-- **Calendar Assistant** reads calendar, owned and approved by Chris Bennett.
-- **Support Macros** reads Slack, owned and approved by Pat Morgan.
-
-Both are read-only, with active owners who approved them. We list them because Slack and calendar content is often sensitive.
-
-**Action:** confirm that these access levels are intended.
+**Calendar Assistant** (calendar) and **Support Macros** (Slack) are read-only, and each is owned and approved by an active employee (Chris Bennett and Pat Morgan). They are listed only because calendar and Slack content is often sensitive. **Action:** confirm that this access is intended.
 
 ### Finding 8 (low): account hygiene
 
-- **MFA not reported** for John Doe (`u-1001`) and Jordan Blake (`u-1011`), in addition to the accounts above.
-- **Taylor Reed (`u-1012`)** is active but has not logged in for **85 days**. Confirm the account is still needed.
-- **"Everyone" does not contain everyone.** Lumen has 12 accounts, but "Everyone" has 8 members. The 4 not in it:
-  - Mary Johnson (`u-1004`) and Riley Brooks (`u-1010`): deprovisioned, which is expected;
-  - svc-lumen (`u-1006`): a service account, which is likely expected;
-  - **James Miller (`u-1002`): an active employee and admin, which is not expected** (finding 4).
-
-  Any policy or access that Acme applies through "Everyone" does not reach these accounts. Do not use "Everyone" as the list of all staff.
-- **The contractor account `u-1005` is in "Everyone"**, so anything granted to "Everyone" also reaches a non-employee.
-- **Lumen reports user status in mixed casing** (`ACTIVE` and `active`). Harmless for us, but worth knowing for any other tool that reads it.
+| Item | Action |
+| --- | --- |
+| MFA not reported for John Doe (`u-1001`) and Jordan Blake (`u-1011`) | Confirm MFA |
+| Taylor Reed (`u-1012`): active, no login for 85 days | Confirm the account is still needed |
+| "Everyone" has 8 of 12 accounts. The two deprovisioned users and svc-lumen are expected to be missing; James Miller (finding 4) is not | Don't treat "Everyone" as all staff, and check that policies applied through it cover everyone they should |
+| The contractor account `u-1005` is in "Everyone" | Check what "Everyone" grants, since it reaches a non-employee |
+| User status arrives in mixed casing (`ACTIVE`, `active`) | None for us; worth knowing for other tools that read it |
 
 ### What we could not see yet
 
