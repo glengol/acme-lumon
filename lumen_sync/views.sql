@@ -59,9 +59,11 @@ paths AS (
     FROM admin_tree t
     JOIN group_members m ON m.source_app = t.source_app AND m.group_id = t.group_id AND m.member_type = 'user'
 )
-SELECT i.*, p.via AS admin_via
+-- LEFT JOIN: a member id that is not a known user is kept (external_id NULL),
+-- so it surfaces in the answers instead of being silently dropped.
+SELECT p.user_id AS admin_id, p.source_app AS admin_source_app, i.*, p.via AS admin_via
 FROM paths p
-JOIN v_identities i ON i.source_app = p.source_app AND i.external_id = p.user_id
+LEFT JOIN v_identities i ON i.source_app = p.source_app AND i.external_id = p.user_id
 WHERE p.n = 1;
 
 -- One row per agent tool: what it reaches, whether that is sensitive or
@@ -87,8 +89,9 @@ WITH base AS (
            t.target,
            t.target_host,
            t.scopes        AS tool_scopes,
-           CASE WHEN t.kind = 'http' THEN NULL ELSE lower(COALESCE(c.app, t.target)) END AS app,
+           CASE WHEN t.kind = 'http' THEN NULL ELSE lower(COALESCE(c.app, t.target)) END AS app,  -- unknown kind counts as a connector
            t.connection_id,
+           c.external_id   AS connection_ref,   -- NULL when connection_id does not resolve
            c.name          AS connection_name,
            c.scopes        AS connection_scopes,
            c.last_used_at  AS connection_last_used_at,
@@ -105,7 +108,7 @@ WITH base AS (
     LEFT JOIN v_identities au ON au.source_app = c.source_app AND au.external_id = c.authorized_by
 )
 SELECT b.*,
-       CASE WHEN b.tool_kind <> 'http' AND (
+       CASE WHEN COALESCE(b.tool_kind, '') <> 'http' AND (
                  NOT EXISTS (SELECT 1 FROM app_classification ac WHERE ac.app = b.app AND ac.sensitive = 0)
                  OR EXISTS (SELECT 1 FROM json_each(b.tool_scopes) s
                              WHERE lower(s.value) LIKE '%write%' OR lower(s.value) LIKE '%admin%')

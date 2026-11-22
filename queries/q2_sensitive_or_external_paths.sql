@@ -26,6 +26,7 @@ SELECT p.agent_id,
        END                                                         AS why,
        COALESCE(p.tool_scopes, '[]')                               AS scopes,
        CASE WHEN p.connection_id IS NULL  THEN 'none on record (no stored connection)'
+            WHEN p.connection_ref IS NULL THEN 'unknown (connection ' || p.connection_id || ' not found)'
             WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
             WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
             ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
