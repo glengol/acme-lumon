@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .connectors.lumen import LumenConnector
 from .http import HttpClient
@@ -46,6 +47,10 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print(f"error: set {' and '.join(missing)} in the environment", file=sys.stderr)
         return 2
+
+    host = (urlparse(base_url).hostname or "").lower()
+    if urlparse(base_url).scheme != "https" and host not in ("localhost", "127.0.0.1", "::1"):
+        print(f"warning: {base_url} is not https; the token will be sent unencrypted", file=sys.stderr)
 
     store = Store(args.db)
     try:

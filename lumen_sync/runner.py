@@ -20,7 +20,14 @@ EXPLAIN = {
 def run_sync(connector: Connector, store: Store, base_url: str) -> int:
     run_id = store.start_run(connector.source_app, base_url)
     ok = failed = 0
+    auth_failed_on: str | None = None
     for res in connector.resources():
+        if auth_failed_on:
+            # The token was rejected; every other call would fail the same way.
+            failed += 1
+            store.record_coverage(run_id, res.name, "failed", error="skipped",
+                                  detail=f"not attempted: token rejected (401) on {auth_failed_on}")
+            continue
         cursor = store.newest(connector.source_app, *res.cursor) if res.cursor else None
         try:
             result = res.fetch(cursor)
@@ -29,6 +36,8 @@ def run_sync(connector: Connector, store: Store, base_url: str) -> int:
             failed += 1
             store.record_coverage(run_id, res.name, "failed", http_status=exc.http_status,
                                   error=exc.error, detail=_detail(exc))
+            if exc.http_status == 401:
+                auth_failed_on = res.name
             continue
         except Exception as exc:  # malformed object, unexpected shape: keep the run going
             failed += 1

@@ -19,6 +19,7 @@ class Store:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")  # make the REFERENCES in schema.sql real
         self.db.executescript(SCHEMA.read_text())
         self.db.executescript(VIEWS.read_text())
 
