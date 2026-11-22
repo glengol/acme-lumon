@@ -14,10 +14,12 @@ What I would change before running this for a real customer, most important firs
 | --- | --- | --- |
 | **Token** | Read from an environment variable | Stored in a secrets manager and rotated. Ask the vendor for a read-only, least-privilege integration token that includes `audit.read`. |
 | **Scheduling and alerting** | Run by hand | Run on a schedule (for example hourly). Alert on exit code `1` (nothing collected), and on any resource that stays STALE longer than a set time. |
-| **Audit log** | Ready but never run against Lumen (access denied). Incremental (`since` = newest stored event minus 10 minutes), append-only, follows paging if present; tested against a fake API | Run it against Lumen as soon as `audit.read` is granted, and confirm Lumen's retention window, paging and event detail before relying on it |
+| **Audit log** | Ready but never run against Lumen (access denied). Incremental (`since` = newest stored event minus 24 hours, explicit epoch on the first run), append-only, follows paging and tolerates a growing log; tested against a fake API | Run it against Lumen as soon as `audit.read` is granted, and confirm Lumen's retention window, paging and event detail before relying on it |
 | **Change history** | Each run replaces the previous copy | Keep snapshots, or a change log per entity, so "new agent", "owner changed" and "scope added" become alerts instead of silent updates. |
 | **Paging** | Stops at `total_pages`; aborts if it changes mid-fetch | Ask the vendor for cursor-based paging or a snapshot token. Add a page-size check to detect quiet truncation on the unpaginated endpoints. |
-| **Resilience** | Retries 5xx and network errors; does not retry 4xx | Check `/health` once before starting, honour `Retry-After` on 429, and add a total time budget per run. |
+| **Resilience** | Retries 5xx and network errors (honouring `Retry-After`); never retries other 4xx; stops after a 401; refuses redirects | Check `/health` once before starting, and add a total time budget per run. |
+| **Schema changes** | `CREATE TABLE IF NOT EXISTS`; a changed schema is not applied to an existing database | Versioned migrations. |
+| **Reporting date** | "Today" (2026-11-09) is written into the Q3 SQL, as the assignment fixes it | A parameter, defaulting to the time of the last successful sync. |
 | **API drift** | Unknown fields are kept in `raw_records` | Contract tests against the vendor API, plus alerts when new fields, new status values or new tool kinds appear. |
 | **Storage** | Local SQLite file | A managed database per tenant, encrypted at rest. The data contains personal information (names, emails, login times), so it needs access control and a retention policy. |
 | **Policy config** | `config.json` in the repo | Owned and approved by the customer, versioned, with a record of who changed what. |
@@ -49,6 +51,8 @@ What I would change before running this for a real customer, most important firs
 
 Verification also caught two bugs in its code, both now fixed: the report claimed data was unusable after a failed run (it was intact), and the exit code was `0` even when nothing was collected.
 
+I also had the solution reviewed from a fresh clone by a second engineer using their own AI assistant, and fixed what held up. The most important: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late. Each fix is a separate commit with a test that breaks the old behaviour.
+
 ---
 
 ## 4. Answers
@@ -69,9 +73,10 @@ SELECT a.external_id                                   AS agent_id,
            WHEN a.owner_id IS NULL        THEN 'no owner set'
            WHEN o.external_id IS NULL     THEN 'owner id not found in users'
            WHEN o.is_active = 0           THEN 'owner not active (' || COALESCE(o.status_raw, 'no status') || ')'
+           WHEN o.kind IS NULL            THEN 'owner kind unknown'
            WHEN o.kind <> 'human'         THEN 'owner is not a human (' || o.kind || ')'
        END                                             AS reason,
-       (SELECT group_concat(COALESCE(t.target_host, t.target), ', ')
+       (SELECT group_concat(COALESCE(t.target_host, t.target, '-'), ', ')
           FROM agent_tools t
          WHERE t.source_app = a.source_app AND t.agent_id = a.external_id)  AS reaches,
        (SELECT MAX(c.last_used_at)
@@ -83,7 +88,7 @@ LEFT JOIN v_identities o ON o.source_app = a.source_app AND o.external_id = a.ow
 WHERE a.owner_id IS NULL
    OR o.external_id IS NULL
    OR o.is_active = 0
-   OR o.kind <> 'human'
+   OR COALESCE(o.kind, '') <> 'human'
 ORDER BY (a.status = 'active') DESC, a.external_id;
 ```
 
@@ -103,17 +108,26 @@ ORDER BY (a.status = 'active') DESC, a.external_id;
 SELECT p.agent_id,
        p.agent_name                                                AS agent,
        COALESCE(p.agent_status, '-')                               AS agent_status,
-       COALESCE(p.owner_name || ' (' || p.owner_status || ')', 'no owner')  AS owner,
-       CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END AS reaches,
-       CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || p.app
-            ELSE 'external: ' || p.target_host END                 AS why,
-       p.tool_scopes                                               AS scopes,
-       CASE WHEN p.connection_id IS NULL THEN 'none on record (no stored connection)'
-            WHEN p.authorizer_id IS NULL THEN 'none on record (connection has no authorizer)'
-            WHEN p.authorizer_name IS NULL THEN p.authorizer_id || ' (not found in users)'
-            ELSE p.authorizer_name || ' (' || p.authorizer_id || ', ' || p.authorizer_status
-                 || CASE WHEN p.authorizer_is_internal = 0 THEN ', external: ' || p.authorizer_domain ELSE '' END
-                 || ')' END                                        AS authorized_by,
+       -- Every concatenated part is wrapped in COALESCE: in SQL, 'x' || NULL is NULL,
+       -- and one missing field must never blank out the whole cell.
+       CASE WHEN p.owner_id IS NULL  THEN 'no owner set'
+            WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
+            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
+       END                                                         AS owner,
+       COALESCE(CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END, '-') AS reaches,
+       CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
+            ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
+       END                                                         AS why,
+       COALESCE(p.tool_scopes, '[]')                               AS scopes,
+       CASE WHEN p.connection_id IS NULL  THEN 'none on record (no stored connection)'
+            WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
+            WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
+            ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
+                 || COALESCE(p.authorizer_status, 'no status')
+                 || CASE WHEN p.authorizer_is_internal = 0
+                         THEN ', external: ' || COALESCE(p.authorizer_domain, '-') ELSE '' END
+                 || ')'
+       END                                                         AS authorized_by,
        COALESCE(p.connection_last_used_at, '-')                    AS last_used_at,
        CASE WHEN EXISTS (SELECT 1 FROM v_agent_paths s
                           WHERE s.source_app = p.source_app AND s.agent_id = p.agent_id AND s.is_sensitive = 1)
@@ -129,7 +143,7 @@ ORDER BY (p.agent_status = 'active') DESC, agent_combines DESC, p.agent_id, p.to
 |---|---|---|---|---|---|---|---|---|---|
 | a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | payroll | sensitive: payroll | ["employees.read"] | Mary Johnson (u-1004, deprovisioned) | 2026-11-08T14:05:00Z | YES |
 | a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | https://hooks.vendor.example/payroll | external: hooks.vendor.example | [] | none on record (no stored connection) | - | YES |
-| a-202 | Shadow Research Bot | active | no owner | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, active, external: partner.example) | 2026-11-07T09:12:00Z |  |
+| a-202 | Shadow Research Bot | active | no owner set | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, active, external: partner.example) | 2026-11-07T09:12:00Z |  |
 | a-205 | Calendar Assistant | active | Chris Bennett (active) | calendar | sensitive: calendar | ["read"] | Chris Bennett (u-1009, active) | 2026-11-06T08:45:00Z |  |
 | a-206 | Support Macros | active | Pat Morgan (active) | slack | sensitive: slack | ["read"] | Pat Morgan (u-1008, active) | 2026-11-05T14:10:00Z |  |
 

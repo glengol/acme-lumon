@@ -3,9 +3,13 @@
 -- Every entity table is keyed on (source_app, external_id), so a second app
 -- writes into the same tables with its own source_app value and no schema change.
 --
--- Refresh rule: a resource (endpoint) is fetched completely first. Only then are
--- its rows replaced, inside one transaction. A resource that fails is not
--- touched: its previous rows stay, and `coverage` records the failure.
+-- Refresh rules:
+--   * Snapshot resources (users, groups, agents, connections) are fetched
+--     completely first, then their rows are replaced inside one transaction.
+--   * The audit log (`events`) is append-only: new events are added, re-read
+--     events land on the same row, nothing is deleted.
+--   * A resource that fails is not touched: its previous rows stay, and
+--     `coverage` records the failure.
 
 -- ---------------------------------------------------------------- run tracking
 

@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 7 tests against a small fake API, so the mock does not need to be running.
+These are 13 tests against a small fake API, so the mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -167,7 +167,7 @@ The program has three stages. Each stage only talks to the next one.
 - Each endpoint is fetched **completely** first. Only then are its rows replaced, **in one transaction**.
 - Running twice gives identical data, so there are no duplicates.
 - If an endpoint fails, its previous data is **kept**, and the report marks it **STALE**.
-- **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 10-minute overlap) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept.
+- **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 24-hour overlap, so events logged late are not missed) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept.
 
 ---
 
@@ -179,7 +179,10 @@ The program has three stages. Each stage only talks to the next one.
 | `/v1/audit` returns **403 `insufficient_scope`** (undocumented): the token lacks `audit.read` | Records it in coverage and carries on with the other endpoints |
 | The 403 suggests **sending your own scopes in an `X-Lumen-Scopes` header** | **We never send it.** Permissions come from the token Acme issued, not from us. Reported as a finding instead. |
 | 401 / 403 / 404 | Not retried: they will not succeed on a second try |
-| Network errors, 429, 5xx | Retried 3 times with backoff |
+| 401 (token rejected) | The remaining endpoints are skipped instead of sending a bad token again |
+| Network errors, 429, 5xx | Retried 3 times with backoff, or after `Retry-After` when the server sends it (up to 60 s) |
+| Redirects | Refused, so the token is only ever sent to `LUMEN_BASE_URL` |
+| Base URL not https | Warning (localhost excepted) |
 
 The full probe results are in `PLAN.md` under *API map*.
 

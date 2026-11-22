@@ -47,13 +47,12 @@ Based on steps 1–3. Requirements from the assignment:
 - **Run tracking:** `sync_runs` (one row per run) and `coverage` (one row per resource per run: ok or failed, HTTP status, error, record count).
 - **Raw data:** `raw_records` keeps every object exactly as received.
 - **Entities**, each keyed on `(source_app, external_id)`: `identities`, `groups`, `group_members`, `agents`, `agent_tools`, `connections`, `events`.
-- **Policy config**, loaded from `config.json` every run: `app_classification`, `internal_domains`, `admin_groups`, `sensitive_scope_patterns`, `settings`.
+- **Policy config**, loaded from `config.json` on every `sync` and `report`: `app_classification`, `internal_domains`, `admin_groups`.
 
-Refresh rules:
-1. Each resource is fetched completely in memory first (all pages). Only then is it written, in one transaction.
-2. Writes are upserts. Every row gets `last_seen_run` = this run.
+Refresh rules (after the simplification review):
+1. Each snapshot resource is fetched completely in memory first (all pages). Only then are its rows replaced (delete + insert) in one transaction.
+2. The audit log is append-only: fetched incrementally (`since` = newest stored event minus 24 h) and never deleted.
 3. If a resource fails, nothing for it is written. Its old rows stay, and coverage records the failure.
-4. A row is "current" if it was seen in the latest run where its resource succeeded. Rows that vanished from the source are kept for history but are not current.
 
 ## Step 5: Build the collector
 A program that reads the base URL and token from the environment, pulls every endpoint, writes to SQLite, keeps going when an endpoint fails, and prints a coverage report.
@@ -93,7 +92,7 @@ SQL for questions 1–3, run against the database, with the results kept for `su
 | API unreachable after a good run | All resources `network_error`, explained in coverage; existing data untouched; exit code 1 |
 | Missing env vars | Clear error, exit code 2 |
 | Answers vs raw responses | Q1–Q3 match the independent hand analysis from step 2 |
-| Automated | `python3 -m unittest -v`: 6 tests against a fake API with invented data (paging past the end, 403, total failure, wrong token, normalization) |
+| Automated | `python3 -m unittest -v`: 13 tests against a fake API with invented data (paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
 
 Problems found and fixed during verification:
 1. **The report claimed data was unusable after a failed run, even though the previous copy was intact.** It now prints per-resource freshness: when each resource was last collected, and whether its latest attempt failed (STALE / NEVER COLLECTED).
@@ -186,7 +185,7 @@ _(filled in during step 2)_
 | u-1003 | Maya Shah | human | **`active`** | true | 2026-11-08 | 0 | acme.com |
 | u-1004 | Mary Johnson | human | DEPROVISIONED | true | 2026-04-15 | 207 | acme.com |
 | u-1005 | Sam Okonkwo | human | ACTIVE | true | 2026-11-07 | 1 | **partner.example** |
-| u-1006 | svc-lumen | **service** | ACTIVE | *missing* | 2026-11-09 01:00 | same day | *no email* |
+| u-1006 | svc-lumen | **service** | ACTIVE | *missing* | 2026-11-09 01:00 | **after "today"** (see D9) | *no email* |
 | u-1007 | Alex Carter | human | ACTIVE | true | 2026-11-08 | 0 | acme.com |
 | u-1008 | Pat Morgan | human | ACTIVE | true | 2026-11-05 | 3 | acme.com |
 | u-1009 | Chris Bennett | human | ACTIVE | true | 2026-11-06 | 2 | acme.com |
@@ -214,7 +213,7 @@ Observations:
 - **Nesting:** g-20 IT sits inside g-30 AI Platform Admins. Membership must be expanded recursively, or James Miller (u-1002) is missed as an admin. Expansion needs a cycle guard; no cycle exists today.
 - **No "admin" field exists in the API.** The only signal is the group name "AI Platform Admins". Treating that group as the admin set is an inference. → Confirm with Acme which groups or roles grant admin rights in Lumen.
 - **Effective admins (3):**
-  - u-1006 svc-lumen: **service account**, MFA field missing, logged in today.
+  - u-1006 svc-lumen: **service account**, MFA field missing, last login 2026-11-09 01:00, an hour after the "today" cut-off (see D9).
   - u-1009 Chris Bennett: human, MFA true, logged in 2 days ago.
   - u-1002 James Miller: human, admin **only through nesting**, MFA field missing, last login **59 days** ago.
 - **"Everyone" is not everyone:** 12 users in total, 8 in "Everyone". The 4 not in it:
@@ -323,3 +322,4 @@ _(filled in during step 3; decisions made earlier are recorded here as they happ
 ### D9: Not logged in for 30 days (question 3)
 - **Decision:** "today" is **2026-11-09T00:00:00Z** (from the assignment). Stale means `last_login_at` is before **2026-10-10T00:00:00Z**, or is null.
 - **Caveat:** the only login data we have is `last_login_at` on the user record. The audit log, which holds login events, is blocked (D1), so we cannot cross-check it.
+- **Edge case:** svc-lumen's last login (2026-11-09 01:00) is *after* the 00:00 cut-off. It does not change any answer (it is recent, and Q3 is humans only), but it shows the data is newer than the assignment's "today". We treat "today" as the reporting date, not as the time the data was pulled.
