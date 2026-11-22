@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from lumen_sync.connectors.lumen import LumenConnector
 from lumen_sync.report import QUERIES
-from lumen_sync.http import HttpClient
+from lumen_sync.http import ApiError, HttpClient
 from lumen_sync.runner import run_sync
 from lumen_sync.store import Store
 
@@ -45,6 +46,22 @@ class FakeApi(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if STATE["fail_all"]:
             return self._send(500, {"error": "internal"})
+        if url.path == "/redirect":                       # would carry the token to another host
+            self.send_response(302)
+            self.send_header("Location", "http://other-host.example/steal")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if url.path == "/busy":                           # 429 once, with Retry-After, then OK
+            STATE["busy_calls"] = STATE.get("busy_calls", 0) + 1
+            if STATE["busy_calls"] == 1:
+                self.send_response(429)
+                self.send_header("Retry-After", "0.2")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            return self._send(200, {"data": []})
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             return self._send(401, {"error": "unauthorized"})
         page = int(parse_qs(url.query).get("page", ["1"])[0])
@@ -156,10 +173,28 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(all(v["status"] == "failed" for v in self.coverage(run_id).values()))
 
-    def test_wrong_token_is_not_retried_and_is_explained(self):
+    def test_wrong_token_is_explained_and_stops_the_run(self):
         cov = self.coverage(self.sync(token="nope"))
         self.assertEqual(cov["users"]["http_status"], 401)
         self.assertIn("token", cov["users"]["detail"])
+        for name in ("groups", "agents", "connections", "audit"):   # not attempted after the 401
+            self.assertEqual(cov[name]["error"], "skipped")
+            self.assertIn("token rejected (401) on users", cov[name]["detail"])
+
+    def test_redirect_is_refused_so_the_token_stays_put(self):
+        client = HttpClient(self.base_url, TOKEN, retries=0)
+        with self.assertRaises(ApiError) as ctx:
+            client.get_json("/redirect")
+        self.assertEqual(ctx.exception.http_status, 302)
+        self.assertIn("redirect_refused", ctx.exception.error)
+
+    def test_retry_after_is_honoured(self):
+        STATE["busy_calls"] = 0
+        client = HttpClient(self.base_url, TOKEN, retries=1, backoff=30)   # backoff would take 30 s
+        started = time.monotonic()
+        self.assertEqual(client.get_json("/busy"), {"data": []})
+        self.assertLess(time.monotonic() - started, 5)                     # waited Retry-After (0.2 s) instead
+        self.assertEqual(STATE["busy_calls"], 2)
 
     def event_ids(self):
         return [r[0] for r in self.store.db.execute("SELECT external_id FROM events ORDER BY 1")]
