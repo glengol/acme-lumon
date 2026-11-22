@@ -133,6 +133,22 @@ class ReuseTest(unittest.TestCase):
         run_sync(NimbusConnector(NIMBUS), self.store, "memory://nimbus")   # refresh again
         self.assertEqual([tuple(r) for r in count()], before)
 
+    def test_rows_with_keys_in_any_order_or_missing_land_in_the_right_columns(self):
+        rows = {"identities": [
+            {"external_id": "z-1", "display_name": "First", "email": "first@corp.example"},
+            {"email": "second@corp.example", "display_name": "Second", "external_id": "z-2"},   # other order
+            {"external_id": "z-3", "email": "third@corp.example"},                              # key missing
+        ]}
+        self.store.replace_resource(0, "zeta", "people", ("identities",), [{"id": r["external_id"]} for r in rows["identities"]], rows)
+        got = [tuple(r) for r in self.store.db.execute(
+            "SELECT external_id, display_name, email FROM identities WHERE source_app = 'zeta' ORDER BY 1")]
+        self.assertEqual(got, [("z-1", "First", "first@corp.example"),
+                               ("z-2", "Second", "second@corp.example"),
+                               ("z-3", None, "third@corp.example")])
+        with self.assertRaises(ValueError):                           # a typo'd key fails loudly
+            self.store.replace_resource(0, "zeta", "people", ("identities",), [{"id": "z-4"}],
+                                        {"identities": [{"external_id": "z-4", "emial": "x"}]})
+
     def test_apps_share_one_database_without_interfering(self):
         apps = dict(self.store.db.execute("SELECT source_app, COUNT(*) FROM identities GROUP BY source_app"))
         self.assertEqual(apps, {"nimbus": 4, "other": 1})

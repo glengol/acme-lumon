@@ -76,9 +76,7 @@ class Store:
                 table_rows = rows.get(table, [])
                 if not table_rows:
                     continue
-                columns = ["source_app", "resource", *table_rows[0].keys()]
-                sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})"
-                self.db.executemany(sql, [(source_app, resource, *r.values()) for r in table_rows])
+                self._insert(table, source_app, resource, table_rows, "INSERT")
 
     def append_resource(self, run_id: int, source_app: str, resource: str, tables: tuple[str, ...],
                         raw_items: list[dict], rows: dict[str, list[dict]]) -> int:
@@ -99,11 +97,25 @@ class Store:
                 table_rows = rows.get(table, [])
                 if not table_rows:
                     continue
-                columns = ["source_app", "resource", *table_rows[0].keys()]
-                sql = (f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) "
-                       f"VALUES ({', '.join('?' * len(columns))})")
-                self.db.executemany(sql, [(source_app, resource, *r.values()) for r in table_rows])
+                self._insert(table, source_app, resource, table_rows, "INSERT OR REPLACE")
         return new_count
+
+    def _insert(self, table: str, source_app: str, resource: str, rows: list[dict], verb: str) -> None:
+        """Insert rows using the table's own column list, looked up by name for every row.
+
+        A row may list its keys in any order or leave optional ones out (stored as
+        NULL); values can never shift into the wrong column. A key the table does
+        not have is an error, so a connector's typo fails loudly instead of being
+        dropped.
+        """
+        columns = [c[1] for c in self.db.execute(f"PRAGMA table_info({table})")
+                   if c[1] not in ("source_app", "resource")]
+        unknown = {k for r in rows for k in r} - set(columns)
+        if unknown:
+            raise ValueError(f"{table} has no column(s) {sorted(unknown)}")
+        sql = (f"{verb} INTO {table} (source_app, resource, {', '.join(columns)}) "
+               f"VALUES ({', '.join('?' * (len(columns) + 2))})")
+        self.db.executemany(sql, [(source_app, resource, *(r.get(c) for c in columns)) for r in rows])
 
     def newest(self, source_app: str, table: str, column: str) -> str | None:
         """Newest stored timestamp in `column` for this app, used as an incremental-fetch cursor.
