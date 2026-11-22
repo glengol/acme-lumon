@@ -52,7 +52,11 @@ What I would change before running this for a real customer, most important firs
 
 Verification also caught two bugs in its code, both now fixed: the report claimed data was unusable after a failed run (it was intact), and the exit code was `0` even when nothing was collected.
 
-I also had the solution reviewed from a fresh clone by a second engineer using their own AI assistant, and fixed what held up. The most important: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late. Each fix is a separate commit with a test that breaks the old behaviour. A final independent review of a fresh clone found that Q3 hid admins whose account was not active, and that malformed dates and missing references could fall out of the answers; those are fixed too, and the analysis rules now have their own tests.
+**Outside reviews.** After the first version, the solution was reviewed three times from a fresh clone:
+- **Two rounds by a friend**, running their own AI assistant. Their main catches: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late.
+- **One independent AI review** that I ran myself, with no access to my notes. It found that Q3 hid admins whose account was not active, and that malformed dates and missing references could fall out of the answers.
+
+I fixed what held up, one change per commit. Most fixes are covered by a test, either in the same commit or a later one (the analysis-rule tests were added together at the end). A few small ones were checked by hand only: the agent status column, the https warning, enforcing foreign keys, and the error for a missing database file.
 
 ---
 
@@ -266,15 +270,14 @@ We cannot yet see whether payroll data was actually sent to the outside address,
 1. Assign an Acme owner, or disable the agent.
 2. Confirm whether contractors may connect company data to AI agents. If not, revoke `c-303` and reconnect it under an employee.
 
-### Finding 3 (high): we cannot see what agents did, and Lumen's API may let any token read the audit log
+### Finding 3 (high): we cannot see what agents did
 
-- The token Acme issued for this integration **does not have `audit.read`**. The audit endpoint returned `403 insufficient_scope`. So we cannot see logins, tool invocations or OAuth grants, which means we cannot confirm or rule out data leaving through finding 1.
-- The refusal message tells callers to **declare their own permissions in an `X-Lumen-Scopes` request header**. If Lumen trusts that header, **anyone holding any Lumen token could read the audit log**, and possibly more.
-- **We did not send this header.** Using it would mean accessing data Acme did not grant us. We have not confirmed whether the server honours it.
+The token Acme issued for this integration **does not have `audit.read`**. The audit endpoint returned `403 insufficient_scope`. So we cannot see logins, tool invocations or OAuth grants, which means we cannot confirm or rule out data leaving through finding 1.
 
-**Action:**
-1. Grant `audit.read` to the integration token.
-2. Ask the Lumen vendor to confirm whether `X-Lumen-Scopes` is trusted, and to fix it if so. Until then, treat every Lumen token as able to read the audit log.
+**Action:** grant `audit.read` to the integration token.
+
+> **For Acme's security team only (please do not forward more widely until the vendor responds).**
+> The 403 message tells callers to declare their own permissions in an `X-Lumen-Scopes` request header. If Lumen trusts a permission the caller declares, any Lumen token holder might be able to read the audit log. **This is unconfirmed:** we deliberately did not send the header, because that would mean accessing data Acme did not grant us. Please raise it with Lumen as a possible vulnerability and ask them to confirm whether the header is trusted.
 
 ### Finding 4 (high): an admin with unconfirmed MFA who has not logged in for 60 days
 
@@ -340,7 +343,7 @@ These tools are not backed by a stored connection, so Lumen records nobody as ap
 
 1. **Today:** disable or contain Finance Copilot (finding 1).
 2. Grant **`audit.read`** to the integration token, and confirm the token is read-only.
-3. Raise the **`X-Lumen-Scopes`** question with the Lumen vendor.
+3. **Security team:** raise the vendor question in finding 3 with Lumen.
 4. Assign an owner to Shadow Research Bot, or disable it, and decide on contractor-approved connections.
 5. Review admin access for James Miller and svc-lumen, and enforce MFA.
 6. Confirm our working definitions: admin groups, Acme domains, sensitive apps, and status values.
