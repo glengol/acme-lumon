@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite3
+
+# Local tooling
+.claude/
+
+# Local DB output
+*.db
+
+# Files provided by Reco: kept locally, never committed
+ASSIGNMENT.md
+API.md
+Reco-FDE-home-assignment.pdf
+mock_server.py
+Dockerfile
+docker-compose.yml

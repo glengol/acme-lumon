@@ -1,0 +1,15 @@
+{
+  "_comment": "Customer policy used by the analysis. Every entry here is pending confirmation by Acme (see PLAN.md, Decisions D4, D5, D7).",
+  "internal_domains": ["acme.com"],
+  "admin_groups": {
+    "lumen": ["AI Platform Admins"]
+  },
+  "app_classification": {
+    "payroll":      {"sensitive": true,  "reason": "employee personal and pay data"},
+    "google-drive": {"sensitive": true,  "reason": "broad company file store"},
+    "slack":        {"sensitive": true,  "reason": "free-text messages: credentials, customer and HR content"},
+    "calendar":     {"sensitive": true,  "reason": "meeting titles, attendees and notes"},
+    "jira":         {"sensitive": false, "reason": "read-only helpdesk tickets"},
+    "wiki":         {"sensitive": false, "reason": "read-only internal documentation"}
+  }
+}
