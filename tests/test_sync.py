@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from lumen_sync.connectors.lumen import LumenConnector
+from lumen_sync.report import QUERIES
 from lumen_sync.http import HttpClient
 from lumen_sync.runner import run_sync
 from lumen_sync.store import Store
@@ -167,6 +168,26 @@ class SyncTest(unittest.TestCase):
 
         self.sync()                                                   # nothing new: still exactly 3
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 3)
+
+    def test_queries_never_blank_out_when_fields_are_missing(self):
+        """In SQL, 'x' || NULL is NULL. One missing field must not empty a whole answer cell."""
+        self.sync()
+        db = self.store.db
+        db.execute("INSERT INTO connections (source_app, external_id, app, authorized_by, scopes) "
+                   "VALUES ('lumen', 'c-1', 'payroll', 'u-2', '[]')")
+        db.execute("INSERT INTO agent_tools (source_app, agent_id, tool_id, kind, target, connection_id, scopes) "
+                   "VALUES ('lumen', 'a-1', 't-2', 'saas_connector', 'payroll', 'c-1', '[]')")
+        db.execute("UPDATE identities SET status = NULL, status_raw = NULL WHERE external_id = 'u-2'")
+        db.execute("UPDATE agents SET owner_id = 'u-missing' WHERE external_id = 'a-1'")
+        for name in ("q1_agents_without_living_owner.sql", "q2_sensitive_or_external_paths.sql"):
+            cursor = db.execute((QUERIES / name).read_text())
+            columns = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+            self.assertTrue(rows, name)
+            for row in rows:
+                for column in ("owner", "reason", "authorized_by", "why"):
+                    if column in columns:
+                        self.assertTrue(row[columns.index(column)], f"{name}: empty {column} in {tuple(row)}")
 
     def test_normalization(self):
         self.sync()

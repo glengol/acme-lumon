@@ -14,17 +14,26 @@
 SELECT p.agent_id,
        p.agent_name                                                AS agent,
        COALESCE(p.agent_status, '-')                               AS agent_status,
-       COALESCE(p.owner_name || ' (' || p.owner_status || ')', 'no owner')  AS owner,
-       CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END AS reaches,
-       CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || p.app
-            ELSE 'external: ' || p.target_host END                 AS why,
-       p.tool_scopes                                               AS scopes,
-       CASE WHEN p.connection_id IS NULL THEN 'none on record (no stored connection)'
-            WHEN p.authorizer_id IS NULL THEN 'none on record (connection has no authorizer)'
-            WHEN p.authorizer_name IS NULL THEN p.authorizer_id || ' (not found in users)'
-            ELSE p.authorizer_name || ' (' || p.authorizer_id || ', ' || p.authorizer_status
-                 || CASE WHEN p.authorizer_is_internal = 0 THEN ', external: ' || p.authorizer_domain ELSE '' END
-                 || ')' END                                        AS authorized_by,
+       -- Every concatenated part is wrapped in COALESCE: in SQL, 'x' || NULL is NULL,
+       -- and one missing field must never blank out the whole cell.
+       CASE WHEN p.owner_id IS NULL  THEN 'no owner set'
+            WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
+            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
+       END                                                         AS owner,
+       COALESCE(CASE WHEN p.tool_kind = 'http' THEN p.target ELSE p.app END, '-') AS reaches,
+       CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
+            ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
+       END                                                         AS why,
+       COALESCE(p.tool_scopes, '[]')                               AS scopes,
+       CASE WHEN p.connection_id IS NULL  THEN 'none on record (no stored connection)'
+            WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
+            WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
+            ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
+                 || COALESCE(p.authorizer_status, 'no status')
+                 || CASE WHEN p.authorizer_is_internal = 0
+                         THEN ', external: ' || COALESCE(p.authorizer_domain, '-') ELSE '' END
+                 || ')'
+       END                                                         AS authorized_by,
        COALESCE(p.connection_last_used_at, '-')                    AS last_used_at,
        CASE WHEN EXISTS (SELECT 1 FROM v_agent_paths s
                           WHERE s.source_app = p.source_app AND s.agent_id = p.agent_id AND s.is_sensitive = 1)

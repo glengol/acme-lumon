@@ -56,6 +56,7 @@ WITH base AS (
            a.name          AS agent_name,
            a.status        AS agent_status,
            a.owner_id,
+           o.external_id   AS owner_ref,       -- NULL when owner_id does not resolve to a user
            o.display_name  AS owner_name,
            o.status        AS owner_status,
            o.kind          AS owner_kind,
@@ -70,6 +71,7 @@ WITH base AS (
            c.scopes        AS connection_scopes,
            c.last_used_at  AS connection_last_used_at,
            c.authorized_by AS authorizer_id,
+           au.external_id  AS authorizer_ref,  -- NULL when authorized_by does not resolve to a user
            au.display_name AS authorizer_name,
            au.status       AS authorizer_status,
            au.email_domain AS authorizer_domain,

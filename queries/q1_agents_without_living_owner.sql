@@ -14,9 +14,10 @@ SELECT a.external_id                                   AS agent_id,
            WHEN a.owner_id IS NULL        THEN 'no owner set'
            WHEN o.external_id IS NULL     THEN 'owner id not found in users'
            WHEN o.is_active = 0           THEN 'owner not active (' || COALESCE(o.status_raw, 'no status') || ')'
+           WHEN o.kind IS NULL            THEN 'owner kind unknown'
            WHEN o.kind <> 'human'         THEN 'owner is not a human (' || o.kind || ')'
        END                                             AS reason,
-       (SELECT group_concat(COALESCE(t.target_host, t.target), ', ')
+       (SELECT group_concat(COALESCE(t.target_host, t.target, '-'), ', ')
           FROM agent_tools t
          WHERE t.source_app = a.source_app AND t.agent_id = a.external_id)  AS reaches,
        (SELECT MAX(c.last_used_at)
@@ -28,5 +29,5 @@ LEFT JOIN v_identities o ON o.source_app = a.source_app AND o.external_id = a.ow
 WHERE a.owner_id IS NULL
    OR o.external_id IS NULL
    OR o.is_active = 0
-   OR o.kind <> 'human'
+   OR COALESCE(o.kind, '') <> 'human'
 ORDER BY (a.status = 'active') DESC, a.external_id;
