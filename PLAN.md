@@ -1,6 +1,6 @@
 # Plan: Acme / Lumen integration
 
-Written before building. Each step is finished before the next one starts, and later steps are refined from what earlier steps find.
+Started before any code was written, as the list of steps below, and filled in as each step was done: the API map, data map, decisions and results were added along the way. Each step was finished before the next one started.
 
 ## Goal
 
@@ -88,11 +88,11 @@ SQL for questions 1–3, run against the database, with the results kept for `su
 | Check | Outcome |
 | --- | --- |
 | Run twice on the same DB | Identical row counts and an identical content hash across all data tables |
-| Wrong token after a good run | All resources 401, explained in coverage; existing data untouched; exit code 1 |
+| Wrong token after a good run | 401 on the first resource; the rest are skipped instead of resending a rejected token; existing data untouched; exit code 1 |
 | API unreachable after a good run | All resources `network_error`, explained in coverage; existing data untouched; exit code 1 |
 | Missing env vars | Clear error, exit code 2 |
 | Answers vs raw responses | Q1–Q3 match the independent hand analysis from step 2 |
-| Automated | `python3 -m unittest -v`: 23 tests. 13 run the collector against a fake API with invented data, 7 check the analysis rules on hand-built databases, and 3 run an invented second app through the same code to prove reuse (nested groups and cycles, every Q1/Q3 reason, sensitive/external rules, Q2 authorizers). The collector tests cover: paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
+| Automated | `python3 -m unittest -v`: 31 tests. 17 run the collector against a fake API with invented data, 11 check the analysis rules on hand-built databases, and 3 run an invented second app through the same code to prove reuse (nested groups and cycles, every Q1/Q3 reason, sensitive/external rules, Q2 authorizers). The collector tests cover: paging past the end, 403, total failure, wrong token, normalization, incremental and late audit events, a growing audit log, missing fields in answers, admin group matching, redirects, Retry-After) |
 
 Problems found and fixed during verification:
 1. **The report claimed data was unusable after a failed run, even though the previous copy was intact.** It now prints per-resource freshness: when each resource was last collected, and whether its latest attempt failed (STALE / NEVER COLLECTED).
@@ -294,7 +294,8 @@ _(filled in during step 3; decisions made earlier are recorded here as they happ
 - **Rule: if in doubt, it is sensitive.** Sensitivity is a **config list**, not logic in the code. An app counts as non-sensitive only if it is explicitly listed as such; **any app not on the list is sensitive by default**, including apps that appear in the future.
   - **Sensitive:** `payroll` (employee personal and pay data), `google-drive` (a broad file store), `slack` (free-text messages that often hold credentials, customer and HR content), `calendar` (meeting titles, attendees and notes).
   - **Not sensitive (explicitly listed):** `jira` (read, helpdesk tickets), `wiki` (read, internal docs).
-  - **Any write or admin scope** on any app counts as sensitive. None is seen today.
+  - **Any powerful scope** on any app counts as sensitive: `*`, or a scope containing write, admin, delete, manage, full, owner or root. None is seen today.
+  - If a tool's target and its connection's app disagree, either one being sensitive is enough, and the answer shows the mismatch.
 - → Ask Acme to confirm the whole classification, including jira and wiki.
 
 ### D5: Outside Acme (question 2)

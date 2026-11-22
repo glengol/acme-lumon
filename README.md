@@ -68,7 +68,7 @@ This shows how fresh each part of the data is, then runs every query in `queries
 ```bash
 python3 -m unittest -v
 ```
-These are 23 tests: 13 run the collector against a small fake API, 7 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases, and 3 prove a second app reuses the same tables, views and queries. The mock does not need to be running.
+These are 31 tests: 17 run the collector against a small fake API, 11 check the analysis rules (admins, Q1–Q3, sensitive and external) on small hand-built databases, and 3 prove a second app reuses the same tables, views and queries. The mock does not need to be running.
 
 **Step 7 (optional): explore the database yourself**
 ```bash
@@ -83,7 +83,8 @@ sqlite> .read queries/q1_agents_without_living_owner.sql
 | Source app | `--app name` | `lumen` |
 | API address | `<APP>_BASE_URL`, e.g. `LUMEN_BASE_URL` (required) | – |
 | API token | `<APP>_TOKEN`, e.g. `LUMEN_TOKEN` (required) | – |
-| Database file | `--db path` or `LUMEN_DB` | `lumen.db` |
+| Database file | `--db path` or `<APP>_DB` | `<app>.db`, i.e. `lumen.db` |
+| Accept an empty list | `--allow-empty` | off: a resource that suddenly returns nothing is refused, and the stored data kept |
 | Policy config | `--config path` | `lumen_sync/config.json` |
 
 ### Exit codes
@@ -118,7 +119,8 @@ The program has three stages. Each stage only talks to the next one.
 | `lumen_sync/__main__.py` | Command line: `sync` and `report` |
 | `lumen_sync/http.py` | HTTP client: token, timeout, retries |
 | `lumen_sync/connectors/base.py` | The contract every source app follows |
-| `lumen_sync/connectors/lumen.py` | Everything Lumen-specific: endpoints, paging, field mapping |
+| `lumen_sync/connectors/lumen.py` | Everything Lumen-specific: endpoints and field mapping |
+| `lumen_sync/connectors/paging.py` | Paging and dedupe any HTTP connector can reuse |
 | `lumen_sync/runner.py` | Runs each endpoint, records coverage, prints the coverage report |
 | `lumen_sync/store.py` | Writes to SQLite safely and loads the policy config |
 | `lumen_sync/schema.sql` | The tables |
@@ -169,8 +171,9 @@ The program has three stages. Each stage only talks to the next one.
 
 - Each endpoint is fetched **completely** first. Only then are its rows replaced, **in one transaction**.
 - Running twice gives identical data, so there are no duplicates.
-- If an endpoint fails, its previous data is **kept**, and the report marks it **STALE**.
-- **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 24-hour overlap, so events logged late are not missed) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept.
+- If an endpoint fails, its previous data is **kept**, and the report marks it **STALE**. That includes a failed database write (for example a field of the wrong type): it is recorded for that endpoint and the run carries on.
+- **An endpoint that suddenly returns an empty list is refused** when data is already stored, because that is far more often an API fault than a real deletion. Pass `--allow-empty` to accept it.
+- **The audit log is the exception:** it is a log, not a snapshot. Each run asks only for events since the newest one already stored (minus a 24-hour overlap, so events logged late are not missed) and **adds** them. Nothing is deleted, so events that Lumen later drops from its own retention are kept. A stored event with an unreadable or future time is ignored when choosing where to start, and a log whose page count changes while it is read is read twice and merged.
 
 ---
 

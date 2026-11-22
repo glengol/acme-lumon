@@ -44,7 +44,7 @@ What I would change before running this for a real customer, most important firs
 
 1. **The plan was full of assumptions.** The first draft of `PLAN.md` already contained "findings" and definitions (what counts as sensitive, how to treat missing MFA, how refusals behave) before a single API call had been made. I rejected it and had it rewritten as a plan of actions only: test and map everything first, then decide definitions from what the data actually shows. All decisions (D1–D9 in `PLAN.md`) were made only after the data was examined.
 
-2. **The schema was over-engineered.** I asked whether it was. It had run-history columns on every table, five config tables and redundant columns. We cut it to what the assignment needs: a per-resource replace in one transaction, three config tables, and no "current row" filtering in queries. It is just as safe and simpler to explain.
+2. **The schema was over-engineered.** I asked whether it was. It had run-history columns on every table, five config tables and redundant columns. We cut it to what the assignment needs: each snapshot resource replaced in one transaction (the audit log later became append-only), three config tables, and no "current row" filtering in queries. It is just as safe and simpler to explain.
 
 3. **Facts versus inference.** When it reported that a connection's approver was "deprovisioned", I made it show the raw API record. That led to separating what the data proves (the `status` value) from what it implies (the meaning of `DEPROVISIONED` is not documented). Unproven points became questions for Acme instead of statements. The same rule applies to "external approver" versus "approver from the wrong group".
 
@@ -52,11 +52,11 @@ What I would change before running this for a real customer, most important firs
 
 Verification also caught two bugs in its code, both now fixed: the report claimed data was unusable after a failed run (it was intact), and the exit code was `0` even when nothing was collected.
 
-**Outside reviews.** After the first version, the solution was reviewed three times from a fresh clone:
-- **Two rounds by a friend**, running their own AI assistant. Their main catches: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; and the audit design would have missed events logged late.
-- **One independent AI review** that I ran myself, with no access to my notes. It found that Q3 hid admins whose account was not active, and that malformed dates and missing references could fall out of the answers.
+**Outside reviews.** After the first version, the solution was reviewed six times from a fresh clone, and the findings were fixed in rounds:
+- **Three rounds by a friend**, running their own AI assistant. Their main catches: SQL string concatenation with a NULL field blanked out the `authorized_by` cell in Q2; a trailing space in a group name silently produced zero admins; the audit design would have missed events logged late; one bad event time could stall the audit cursor; and Q1 and Q3 used different definitions of "human".
+- **Three independent AI reviews** that I ran myself, each with no access to my notes or earlier reviews. They found that Q3 hid admins whose account was not active, that an empty API response would wipe a table, that one malformed field could crash a sync, and that reuse by a second app was only claimed, not shown (now shown by a test with an invented second app).
 
-I fixed what held up, one change per commit. Most fixes are covered by a test, either in the same commit or a later one (the analysis-rule tests were added together at the end). A few small ones were checked by hand only: the agent status column, the https warning, enforcing foreign keys, and the error for a missing database file.
+I fixed what held up in small commits, each describing what it changes and why. Most fixes are covered by a test, either in the same commit or a later one. A few small ones were checked by hand only: the agent status column, the https warning, enforcing foreign keys, and the error for a missing database file.
 
 ---
 
@@ -104,7 +104,7 @@ ORDER BY (a.status = 'active') DESC, a.external_id;
 
 ### Q2. Which agents can reach a sensitive system or send data outside Acme, and who authorized that path?
 
-- **Sensitive:** any app not explicitly cleared in `config.json` ("if in doubt, sensitive"), or any write or admin scope.
+- **Sensitive:** any app not explicitly cleared in `config.json` ("if in doubt, sensitive"), or any powerful scope (`*`, write, admin, delete, manage, full, owner, root). If a tool's target and its connection's app disagree, either being sensitive is enough.
 - **External:** a tool that calls a URL (Lumen's `http` kind, stored as the neutral `outbound_url`) whose host is not `acme.com` or a subdomain of it.
 - **Authorizer:** the connection's `authorized_by`. If the tool has no stored connection, it is "none on record"; it is never filled in with the owner.
 - **`agent_combines = YES`** marks an agent that holds both a sensitive read and an external send.
@@ -117,10 +117,11 @@ SELECT p.agent_id,
        -- and one missing field must never blank out the whole cell.
        CASE WHEN p.owner_id IS NULL  THEN 'no owner set'
             WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
-            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
+            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status_raw, 'no status') || ')'
        END                                                         AS owner,
        COALESCE(CASE WHEN p.tool_kind = 'outbound_url' THEN p.target ELSE p.app END, '-') AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
+                 || CASE WHEN p.app_mismatch = 1 THEN ' (connection says ' || p.connection_app || ')' ELSE '' END
             ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
        END                                                         AS why,
        COALESCE(p.tool_scopes, '[]')                               AS scopes,
@@ -129,7 +130,7 @@ SELECT p.agent_id,
             WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
             WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
             ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
-                 || COALESCE(p.authorizer_status, 'no status')
+                 || COALESCE(p.authorizer_status_raw, 'no status')
                  || CASE WHEN p.authorizer_is_internal = 0
                          THEN ', external: ' || COALESCE(p.authorizer_domain, '-') ELSE '' END
                  || ')'
@@ -147,11 +148,11 @@ ORDER BY (p.agent_status = 'active') DESC, agent_combines DESC, p.agent_id, p.to
 
 | agent_id | agent | agent_status | owner | reaches | why | scopes | authorized_by | last_used_at | agent_combines |
 |---|---|---|---|---|---|---|---|---|---|
-| a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | payroll | sensitive: payroll | ["employees.read"] | Mary Johnson (u-1004, deprovisioned) | 2026-11-08T14:05:00Z | YES |
-| a-201 | Finance Copilot | active | Mary Johnson (deprovisioned) | https://hooks.vendor.example/payroll | external: hooks.vendor.example | [] | none on record (no stored connection) | - | YES |
-| a-202 | Shadow Research Bot | active | no owner set | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, active, external: partner.example) | 2026-11-07T09:12:00Z |  |
-| a-205 | Calendar Assistant | active | Chris Bennett (active) | calendar | sensitive: calendar | ["read"] | Chris Bennett (u-1009, active) | 2026-11-06T08:45:00Z |  |
-| a-206 | Support Macros | active | Pat Morgan (active) | slack | sensitive: slack | ["read"] | Pat Morgan (u-1008, active) | 2026-11-05T14:10:00Z |  |
+| a-201 | Finance Copilot | active | Mary Johnson (DEPROVISIONED) | payroll | sensitive: payroll | ["employees.read"] | Mary Johnson (u-1004, DEPROVISIONED) | 2026-11-08T14:05:00Z | YES |
+| a-201 | Finance Copilot | active | Mary Johnson (DEPROVISIONED) | https://hooks.vendor.example/payroll | external: hooks.vendor.example | [] | none on record (no stored connection) | - | YES |
+| a-202 | Shadow Research Bot | active | no owner set | google-drive | sensitive: google-drive | ["drive.readonly"] | Sam Okonkwo (u-1005, ACTIVE, external: partner.example) | 2026-11-07T09:12:00Z |  |
+| a-205 | Calendar Assistant | active | Chris Bennett (ACTIVE) | calendar | sensitive: calendar | ["read"] | Chris Bennett (u-1009, ACTIVE) | 2026-11-06T08:45:00Z |  |
+| a-206 | Support Macros | active | Pat Morgan (ACTIVE) | slack | sensitive: slack | ["read"] | Pat Morgan (u-1008, ACTIVE) | 2026-11-05T14:10:00Z |  |
 
 ### Q3. Which human admins are missing MFA or have not logged in for 30 days?
 
@@ -181,7 +182,9 @@ SELECT a.admin_id                                             AS user_id,
          CASE WHEN a.external_id IS NOT NULL AND a.is_active = 0
                                                   THEN 'account not active (' || COALESCE(a.status_raw, 'no status') || '); ' ELSE '' END ||
          CASE WHEN a.external_id IS NOT NULL AND a.kind IS NULL
-                                                  THEN 'account type unknown; ' ELSE '' END ||
+                                                  THEN 'account type unknown; '
+              WHEN a.external_id IS NOT NULL AND a.kind <> 'human'
+                                                  THEN 'account type "' || a.kind || '" is not human; ' ELSE '' END ||
          CASE WHEN a.mfa_enabled IS NOT 1          THEN 'MFA not confirmed; ' ELSE '' END ||
          CASE WHEN a.last_login_at IS NULL         THEN 'no login recorded'
               WHEN a.login_date IS NULL            THEN 'login date unreadable'
@@ -191,7 +194,7 @@ SELECT a.admin_id                                             AS user_id,
 FROM admins a
 WHERE a.external_id IS NULL
    OR a.is_active = 0
-   OR a.kind IS NULL
+   OR COALESCE(a.kind, '') <> 'human'
    OR a.mfa_enabled IS NOT 1
    OR a.login_date IS NULL
    OR a.login_date < '2026-10-10'
@@ -231,7 +234,7 @@ Not in Q3, because it is not human: the service account **svc-lumen (u-1006)** i
 > **To:** Acme Security
 > **Subject:** Lumen AI agents: first security review (data as of 9 November 2026)
 >
-> This summary can be forwarded to IT as is. Findings are ordered by importance. Each one says what we saw, why it matters and what to do.
+> This summary can be forwarded to IT, except the boxed note in finding 3, which is for Acme's security team only. Findings are ordered by importance. Each one says what we saw, why it matters and what to do.
 
 **TL;DR**
 1. **Act today:** "Finance Copilot" reads payroll and can send data to an outside address. Its owner and the person who approved its payroll access have both been deprovisioned, and it was used on 8 November. Disable it or remove the outside webhook.
