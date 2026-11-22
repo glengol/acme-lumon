@@ -17,7 +17,13 @@ EXPLAIN = {
 }
 
 
-def run_sync(connector: Connector, store: Store, base_url: str) -> int:
+def run_sync(connector: Connector, store: Store, base_url: str, allow_empty: bool = False) -> int:
+    """Collect every resource. One resource failing, in fetch, mapping or writing, never stops the others.
+
+    A snapshot resource that comes back empty while rows are stored is refused
+    (previous data kept) unless allow_empty is set: a sudden empty list is far
+    more often an API fault than a real "everything was deleted".
+    """
     run_id = store.start_run(connector.source_app, base_url)
     ok = failed = 0
     auth_failed_on: str | None = None
@@ -43,13 +49,27 @@ def run_sync(connector: Connector, store: Store, base_url: str) -> int:
             failed += 1
             store.record_coverage(run_id, res.name, "failed", error=f"{type(exc).__name__}: {exc}")
             continue
-        if res.mode == "append":
-            new = store.append_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
-            result.notes.append(f"{new} new, {len(result.items) - new} already stored")
-            records = new
-        else:
-            store.replace_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
-            records = len(result.items)
+        if res.mode != "append" and not result.items and not allow_empty:
+            stored = store.count_rows(connector.source_app, res.name)
+            if stored:
+                failed += 1
+                store.record_coverage(run_id, res.name, "failed", error="empty_response_refused",
+                                      detail=f"API returned 0 records but {stored} are stored; previous data kept. "
+                                             f"Re-run with --allow-empty if the source really is empty")
+                continue
+        try:  # the transaction rolls back on any error, so a failed write leaves the previous copy intact
+            if res.mode == "append":
+                new = store.append_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
+                result.notes.append(f"{new} new, {len(result.items) - new} already stored")
+                records = new
+            else:
+                store.replace_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
+                records = len(result.items)
+        except Exception as exc:  # e.g. a field of the wrong type, or an id collision between resources
+            failed += 1
+            store.record_coverage(run_id, res.name, "failed", error=f"store_error: {type(exc).__name__}: {exc}",
+                                  detail="previous data kept")
+            continue
         store.record_coverage(run_id, res.name, "ok", records=records, pages=result.pages,
                               detail="; ".join(result.notes) or None)
         ok += 1

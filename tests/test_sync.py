@@ -33,7 +33,7 @@ AGENTS = [{"id": "a-1", "name": "Bot", "owner_id": "u-0", "status": "active",
            "tools": [{"id": "t-1", "kind": "http", "target": "https://Hooks.Example.net/x",
                       "connection_id": None, "scopes": []}]}]
 STATE = {"fail_all": False, "audit_allowed": False, "events": [], "since_seen": [],
-         "audit_paged": False, "grow_after_first_page": []}
+         "audit_paged": False, "grow_after_first_page": [], "shrink_after_first_page": 0, "users": None}
 
 
 def event(n, time):
@@ -66,7 +66,8 @@ class FakeApi(BaseHTTPRequestHandler):
             return self._send(401, {"error": "unauthorized"})
         page = int(parse_qs(url.query).get("page", ["1"])[0])
         if url.path == "/v1/users":
-            return self._send(200, self._page(USERS, page))
+            users = USERS if STATE["users"] is None else STATE["users"]
+            return self._send(200, self._page(users, page) if users else {"data": [], "page": 1, "total_pages": 1})
         if url.path == "/v1/agents":
             return self._send(200, self._page(AGENTS, page))
         if url.path == "/v1/groups":
@@ -87,6 +88,9 @@ class FakeApi(BaseHTTPRequestHandler):
             if page == 1 and STATE["grow_after_first_page"]:   # a live log grows while we read it
                 STATE["events"] += STATE.pop("grow_after_first_page")
                 STATE["grow_after_first_page"] = []
+            if page == 1 and STATE["shrink_after_first_page"]:  # retention drops the oldest events mid-read
+                STATE["events"] = STATE["events"][STATE["shrink_after_first_page"]:]
+                STATE["shrink_after_first_page"] = 0
             return self._send(200, body)
         return self._send(404, {"error": "not_found"})
 
@@ -121,7 +125,7 @@ class SyncTest(unittest.TestCase):
 
     def setUp(self):
         STATE.update(fail_all=False, audit_allowed=False, events=[], since_seen=[],
-                     audit_paged=False, grow_after_first_page=[])
+                     audit_paged=False, grow_after_first_page=[], shrink_after_first_page=0, users=None)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(str(Path(self.tmp.name) / "t.db"))
 
@@ -234,6 +238,54 @@ class SyncTest(unittest.TestCase):
         cov = self.coverage(self.sync())
         self.assertEqual(cov["audit"]["status"], "ok")
         self.assertEqual(self.event_ids(), [f"e-{i}" for i in range(1, 7)])
+
+    def test_audit_survives_a_log_that_shrinks_while_paging(self):
+        STATE.update(audit_allowed=True, audit_paged=True)
+        STATE["events"] = [event(i, f"2026-11-0{i}T10:00:00Z") for i in range(1, 8)]   # 4 pages of 2
+        STATE["shrink_after_first_page"] = 2       # e-1, e-2 dropped after page 1: the rest shift back a page
+        self.sync()
+        self.assertEqual(self.event_ids(), [f"e-{i}" for i in range(1, 8)])   # nothing skipped
+
+    def test_audit_cursor_ignores_future_and_unreadable_times(self):
+        STATE["audit_allowed"] = True
+        STATE["events"] = [event(1, "2026-11-03T10:00:00Z")]
+        self.sync()
+        db = self.store.db
+        db.execute("INSERT INTO events (source_app, resource, external_id, occurred_at) "
+                   "VALUES ('lumen', 'audit', 'e-skew', '2099-01-01T00:00:00Z')")  # clock skew
+        db.execute("INSERT INTO events (source_app, resource, external_id, occurred_at) "
+                   "VALUES ('lumen', 'audit', 'e-bad', 'yesterday-ish')")         # unreadable
+        db.commit()
+        STATE["events"].append(event(2, "2026-11-04T10:00:00Z"))
+        cov = self.coverage(self.sync())
+        self.assertEqual(cov["audit"]["status"], "ok")
+        self.assertEqual(STATE["since_seen"][-1], "2026-11-02T10:00:00Z")   # from the real newest event
+        self.assertIn("e-2", self.event_ids())
+
+    def test_empty_snapshot_does_not_wipe_stored_data(self):
+        self.sync()
+        STATE["users"] = []                                   # API suddenly returns no users
+        cov = self.coverage(self.sync())
+        self.assertEqual(cov["users"]["status"], "failed")
+        self.assertEqual(cov["users"]["error"], "empty_response_refused")
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM identities").fetchone()[0], 5)
+        client = HttpClient(self.base_url, TOKEN, retries=1, backoff=0)
+        run_sync(LumenConnector(client), self.store, self.base_url, allow_empty=True)   # explicit override
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM identities").fetchone()[0], 0)
+
+    def test_a_malformed_field_fails_one_resource_not_the_run(self):
+        self.sync()
+        STATE["users"] = [dict(USERS[0], display_name={"first": "A"})]   # wrong type for a text column
+        run_id = self.sync()
+        cov = self.coverage(run_id)
+        self.assertEqual(cov["users"]["status"], "failed")
+        self.assertIn("store_error", cov["users"]["error"])
+        self.assertEqual(cov["agents"]["status"], "ok")                  # the rest still ran
+        outcome = self.store.db.execute("SELECT outcome, finished_at FROM sync_runs WHERE run_id = ?",
+                                        (run_id,)).fetchone()
+        self.assertEqual(outcome[0], "partial")
+        self.assertIsNotNone(outcome[1])
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM identities").fetchone()[0], 5)
 
     def test_queries_never_blank_out_when_fields_are_missing(self):
         """In SQL, 'x' || NULL is NULL. One missing field must not empty a whole answer cell."""

@@ -106,9 +106,24 @@ class Store:
         return new_count
 
     def newest(self, source_app: str, table: str, column: str) -> str | None:
-        """Largest stored value of `column` for this app, used as an incremental-fetch cursor."""
-        row = self.db.execute(f"SELECT MAX({column}) FROM {table} WHERE source_app = ?", (source_app,)).fetchone()
+        """Newest stored timestamp in `column` for this app, used as an incremental-fetch cursor.
+
+        Values that are not ISO-8601 timestamps, or that lie more than a day in
+        the future (a skewed clock), are ignored: one bad event must not move
+        the cursor past every real event, or break every later run.
+        """
+        row = self.db.execute(
+            f"SELECT MAX({column}) FROM {table} WHERE source_app = ? "
+            f"AND {column} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]*' "
+            f"AND julianday(substr({column}, 1, 19)) IS NOT NULL "
+            f"AND julianday(substr({column}, 1, 19)) <= julianday('now', '+1 day')",
+            (source_app,)).fetchone()
         return row[0] if row else None
+
+    def count_rows(self, source_app: str, resource: str) -> int:
+        """How many objects of this resource are currently stored."""
+        return self.db.execute("SELECT COUNT(*) FROM raw_records WHERE source_app = ? AND resource = ?",
+                               (source_app, resource)).fetchone()[0]
 
     # ------------------------------------------------------------ policy config
 

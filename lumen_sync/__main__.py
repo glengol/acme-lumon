@@ -29,9 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lumen_sync")
     parser.add_argument("command", choices=["sync", "report"])
     parser.add_argument("--app", default="lumen", choices=sorted(CONNECTORS), help="source app (default: lumen)")
-    parser.add_argument("--db", default=os.environ.get("LUMEN_DB", "lumen.db"), help="SQLite file (default: lumen.db)")
+    parser.add_argument("--db", help="SQLite file (default: <APP>_DB, else <app>.db, e.g. lumen.db)")
+    parser.add_argument("--allow-empty", action="store_true",
+                        help="accept an empty list for a resource that has stored rows (normally refused)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="policy config JSON")
     args = parser.parse_args(argv)
+    args.db = args.db or os.environ.get(f"{args.app.upper()}_DB") or f"{args.app}.db"
 
     if args.command == "report":
         if not Path(args.db).is_file():
@@ -62,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         store.load_config(json.loads(Path(args.config).read_text()))
         connector = CONNECTORS[args.app](HttpClient(base_url, token))
-        run_id = run_sync(connector, store, base_url)
+        run_id = run_sync(connector, store, base_url, allow_empty=args.allow_empty)
         print_coverage(store, run_id)
         print(f"\nDatabase: {Path(args.db).resolve()}")
         outcome = store.db.execute("SELECT outcome FROM sync_runs WHERE run_id = ?", (run_id,)).fetchone()[0]

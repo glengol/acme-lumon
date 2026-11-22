@@ -10,9 +10,8 @@ API behaviour this code relies on, all observed by probing (see PLAN.md, API map
   that header: permissions come from the token Acme issued, not from us.
 - Audit is a log, so it is collected incrementally (`since` = newest stored
   event minus a 24 h overlap; an explicit epoch on the first run) and stored
-  append-only. Events that age out of Lumen's retention are kept here. If a
-  response carries `total_pages`, every page is fetched, and the page count
-  may grow while we read (a live log), which is tolerated for append-only data.
+  append-only. Events that age out of Lumen's retention are kept here. Paging
+  and dedupe live in connectors/paging.py, shared with any other connector.
 """
 
 from __future__ import annotations
@@ -20,14 +19,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from ..http import ApiError, HttpClient
+from ..http import HttpClient
 from .base import (TOOL_APP_CONNECTION, TOOL_OUTBOUND_URL, Connector, FetchResult, Resource,
                    email_domain, lower_or_none, tri_state_bool, url_host)
+from .paging import fetch_list, fetch_pages
 
 # Lumen's tool kinds -> neutral kinds. Anything unknown is kept as received.
 TOOL_KINDS = {"saas_connector": TOOL_APP_CONNECTION, "http": TOOL_OUTBOUND_URL}
 
-MAX_PAGES = 10_000                     # safety stop in case total_pages is ever absurd
 # Re-read a day before the newest stored event, so events that are logged late
 # (with an older timestamp) are still picked up. Re-read events land on the
 # same row (event id is the key), so the overlap costs bandwidth, not correctness.
@@ -53,54 +52,22 @@ class LumenConnector(Connector):
 
     # ------------------------------------------------------------ fetching
 
-    def _single(self, path: str, params: dict | None = None, strict: bool = True) -> FetchResult:
-        """One call. If the response turns out to be paginated, follow it."""
-        body = self.client.get_json(path, params)
-        if "total_pages" in body:
-            return self._paged(path, params, first=body, strict=strict)
-        items, notes = _dedupe(_data(path, body))
-        return FetchResult(items, pages=None, notes=notes)
+    def _single(self, path: str) -> FetchResult:
+        return fetch_list(self.client, path)
+
+    def _paged(self, path: str) -> FetchResult:
+        return fetch_pages(self.client, path)
 
     def _audit(self, cursor: str | None) -> FetchResult:
-        if cursor is None:
+        start = _parse_time(cursor) if cursor else None
+        if start is None:
             since_text, label = AUDIT_EPOCH, "full history"
         else:
-            since_text = (_parse_time(cursor) - AUDIT_OVERLAP).strftime("%Y-%m-%dT%H:%M:%SZ")
+            since_text = (start - AUDIT_OVERLAP).strftime("%Y-%m-%dT%H:%M:%SZ")
             label = "incremental"
-        result = self._single("/v1/audit", {"since": since_text}, strict=False)
+        result = fetch_list(self.client, "/v1/audit", {"since": since_text}, strict=False)
         result.notes.append(f"{label} since {since_text}")
         return result
-
-    def _paged(self, path: str, params: dict | None = None, first: dict | None = None,
-               strict: bool = True) -> FetchResult:
-        """Read pages 1..total_pages.
-
-        strict=True (snapshots): abort if total_pages changes mid-read, because a
-        mixed snapshot is not safe to store. strict=False (append-only logs): a
-        growing log is normal, so keep reading up to the newest page count.
-        """
-        params = dict(params or {})
-        if first is None:
-            first = self.client.get_json(path, {**params, "page": 1})
-        total = first.get("total_pages")
-        if not isinstance(total, int) or total < 1:
-            raise ApiError(path, 200, "missing_total_pages", first)
-        if total > MAX_PAGES:
-            raise ApiError(path, 200, f"total_pages_too_large ({total})", first)
-
-        items = list(_data(path, first))
-        page = 2
-        while page <= total:
-            body = self.client.get_json(path, {**params, "page": page})
-            now_total = body.get("total_pages")
-            if now_total != total:
-                if strict or not isinstance(now_total, int) or now_total > MAX_PAGES:
-                    raise ApiError(path, 200, f"total_pages_changed ({total} -> {now_total})", body)
-                total = max(total, now_total)
-            items.extend(_data(path, body))
-            page += 1
-        items, notes = _dedupe(items)
-        return FetchResult(items, pages=total, notes=notes)
 
     # ------------------------------------------------------------ mapping
 
@@ -163,36 +130,13 @@ class LumenConnector(Connector):
 
 # ---------------------------------------------------------------- helpers
 
-def _parse_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+def _parse_time(value) -> datetime | None:
+    """ISO-8601 to an aware datetime, or None if unreadable (then the audit falls back to full history)."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _data(path: str, body: dict) -> list:
-    data = body.get("data")
-    if not isinstance(data, list):
-        raise ApiError(path, 200, "missing_data_array", body)
-    return data
-
-
-def _dedupe(items: list) -> tuple[list[dict], list[str]]:
-    """Keep the first object per id. Objects without an id cannot be stored safely, so they are counted."""
-    seen, kept, no_id, dupes = set(), [], 0, 0
-    for item in items:
-        item_id = item.get("id") if isinstance(item, dict) else None
-        if not item_id:
-            no_id += 1
-        elif item_id in seen:
-            dupes += 1
-        else:
-            seen.add(item_id)
-            kept.append(item)
-    notes = []
-    if dupes:
-        notes.append(f"{dupes} duplicate id(s) dropped")
-    if no_id:
-        notes.append(f"{no_id} object(s) without id skipped")
-    return kept, notes
 
 
 def _unique(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
