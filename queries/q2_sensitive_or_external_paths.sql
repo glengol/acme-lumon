@@ -18,10 +18,11 @@ SELECT p.agent_id,
        -- and one missing field must never blank out the whole cell.
        CASE WHEN p.owner_id IS NULL  THEN 'no owner set'
             WHEN p.owner_ref IS NULL THEN p.owner_id || ' (not found in users)'
-            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status, 'no status') || ')'
+            ELSE COALESCE(p.owner_name, p.owner_id) || ' (' || COALESCE(p.owner_status_raw, 'no status') || ')'
        END                                                         AS owner,
        COALESCE(CASE WHEN p.tool_kind = 'outbound_url' THEN p.target ELSE p.app END, '-') AS reaches,
        CASE WHEN p.is_sensitive = 1 THEN 'sensitive: ' || COALESCE(p.app, 'unknown app')
+                 || CASE WHEN p.app_mismatch = 1 THEN ' (connection says ' || p.connection_app || ')' ELSE '' END
             ELSE 'external: ' || COALESCE(p.target_host, 'unparseable URL ' || COALESCE(p.target, '-'))
        END                                                         AS why,
        COALESCE(p.tool_scopes, '[]')                               AS scopes,
@@ -30,7 +31,7 @@ SELECT p.agent_id,
             WHEN p.authorizer_id IS NULL  THEN 'none on record (connection has no authorizer)'
             WHEN p.authorizer_ref IS NULL THEN p.authorizer_id || ' (not found in users)'
             ELSE COALESCE(p.authorizer_name, p.authorizer_id) || ' (' || p.authorizer_id || ', '
-                 || COALESCE(p.authorizer_status, 'no status')
+                 || COALESCE(p.authorizer_status_raw, 'no status')
                  || CASE WHEN p.authorizer_is_internal = 0
                          THEN ', external: ' || COALESCE(p.authorizer_domain, '-') ELSE '' END
                  || ')'

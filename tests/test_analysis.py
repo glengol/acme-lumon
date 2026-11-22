@@ -126,6 +126,24 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(rows["u-mfaoff"]["mfa"], "off")
         self.assertEqual(rows["u-stale"]["days_since_login"], 31)      # counted by calendar date
 
+    def test_admin_warnings_for_ambiguous_missing_and_unknown_members(self):
+        self.user("u-1")
+        self.group("g-a", "Admins", "user:u-1", "group:g-missing", "robot:r-1")
+        self.group("g-b", "admins ")                                   # same name, different case/space
+        warnings = [r[0] for r in self.db.execute("SELECT warning FROM v_admin_warnings")]
+        self.assertTrue(any("matches 2 groups" in w for w in warnings), warnings)
+        self.assertTrue(any("nested group g-missing" in w and "does not exist" in w for w in warnings), warnings)
+        self.assertTrue(any("r-1" in w and 'unknown type "robot"' in w for w in warnings), warnings)
+
+    def test_one_definition_of_human_in_q1_and_q3(self):
+        self.user("u-bot", kind="bot")
+        self.group("g-a", "Admins", "user:u-bot")
+        self.agent("a-1", "u-bot")
+        q1 = {r["agent_id"]: r["reason"] for r in self.query("q1_agents_without_living_owner.sql")}
+        q3 = {r["user_id"]: r["reasons"] for r in self.query("q3_admins_mfa_or_stale.sql")}
+        self.assertEqual(q1["a-1"], "owner is not a human (bot)")
+        self.assertIn('account type "bot" is not human', q3["u-bot"])   # flagged, never called human
+
     # ------------------------------------------------------------ Q1
 
     def test_q1_living_owner_rules(self):
@@ -162,6 +180,26 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(self.path("t-listed"), (1, 0))
         self.assertEqual(self.path("t-nokind"), (1, 0))              # unknown kind is not dropped
         self.assertEqual(self.path("t-name-only"), (0, 0))
+
+    def test_powerful_scopes_make_any_app_sensitive(self):
+        self.agent("a-1")
+        for i, scope in enumerate(["*", "issues:delete", "project.manage", "full_access", "owner", "read"]):
+            self.tool("a-1", f"t-{i}", "app_connection", "wiki", scopes=[scope])
+        flags = [self.path(f"t-{i}")[0] for i in range(6)]
+        self.assertEqual(flags, [1, 1, 1, 1, 1, 0])
+
+    def test_connection_app_disagreeing_with_tool_target(self):
+        self.user("u-1")
+        self.agent("a-1", "u-1")
+        self.connection("c-1", "wiki", "u-1")                            # connection claims a cleared app
+        self.tool("a-1", "t-1", "app_connection", "payroll", connection="c-1", scopes=["read"])
+        self.connection("c-2", "payroll", "u-1")                         # and the other way round
+        self.tool("a-1", "t-2", "app_connection", "wiki", connection="c-2", scopes=["read"])
+        self.assertEqual(self.path("t-1"), (1, 0))
+        self.assertEqual(self.path("t-2"), (1, 0))                       # either side sensitive is enough
+        why = {r["reaches"]: r["why"] for r in self.query("q2_sensitive_or_external_paths.sql")}
+        self.assertEqual(why["payroll"], "sensitive: payroll (connection says wiki)")
+        self.assertEqual(why["wiki"], "sensitive: wiki (connection says payroll)")
 
     def test_external_rules_use_exact_domain_suffix(self):
         self.agent("a-1")

@@ -1,8 +1,9 @@
 -- Q3. Which human admins are missing MFA or have not logged in for 30 days?
 --
 -- Admins (D7) are effective members of the configured admin groups, following
--- nested groups. Service accounts are excluded (the question is about humans);
--- an account whose type is unknown is kept, because it might be human.
+-- nested groups. "Human" means kind = 'human', the same rule as Q1. Service
+-- accounts are excluded. An account whose type is missing or is anything else
+-- (e.g. 'bot') is kept and flagged, because it cannot be confirmed as a service.
 -- MFA (D8): flagged unless confirmed on; "unknown" when Lumen does not report
 -- it, which is NOT the same as "off".
 -- Stale (D9): "today" is 2026-11-09 (given by the assignment). Days are counted
@@ -31,7 +32,9 @@ SELECT a.admin_id                                             AS user_id,
          CASE WHEN a.external_id IS NOT NULL AND a.is_active = 0
                                                   THEN 'account not active (' || COALESCE(a.status_raw, 'no status') || '); ' ELSE '' END ||
          CASE WHEN a.external_id IS NOT NULL AND a.kind IS NULL
-                                                  THEN 'account type unknown; ' ELSE '' END ||
+                                                  THEN 'account type unknown; '
+              WHEN a.external_id IS NOT NULL AND a.kind <> 'human'
+                                                  THEN 'account type "' || a.kind || '" is not human; ' ELSE '' END ||
          CASE WHEN a.mfa_enabled IS NOT 1          THEN 'MFA not confirmed; ' ELSE '' END ||
          CASE WHEN a.last_login_at IS NULL         THEN 'no login recorded'
               WHEN a.login_date IS NULL            THEN 'login date unreadable'
@@ -41,7 +44,7 @@ SELECT a.admin_id                                             AS user_id,
 FROM admins a
 WHERE a.external_id IS NULL
    OR a.is_active = 0
-   OR a.kind IS NULL
+   OR COALESCE(a.kind, '') <> 'human'
    OR a.mfa_enabled IS NOT 1
    OR a.login_date IS NULL
    OR a.login_date < '2026-10-10'
