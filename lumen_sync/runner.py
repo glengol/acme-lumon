@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .connectors.base import Connector
+from .connectors.base import NOTES, Connector
 from .http import ApiError
 from .store import Store
 
@@ -38,6 +38,7 @@ def run_sync(connector: Connector, store: Store, base_url: str, allow_empty: boo
         try:
             result = res.fetch(cursor)
             rows = res.to_rows(result.items)
+            result.notes.extend(rows.pop(NOTES, []))   # mapping notes go to coverage
         except ApiError as exc:
             failed += 1
             store.record_coverage(run_id, res.name, "failed", http_status=exc.http_status,

@@ -69,7 +69,7 @@ class FakeApi(BaseHTTPRequestHandler):
             users = USERS if STATE["users"] is None else STATE["users"]
             return self._send(200, self._page(users, page) if users else {"data": [], "page": 1, "total_pages": 1})
         if url.path == "/v1/agents":
-            return self._send(200, self._page(AGENTS, page))
+            return self._send(200, self._page(STATE.get("agents") or AGENTS, page))
         if url.path == "/v1/groups":
             return self._send(200, {"data": [{"id": "g-1", "name": "Admins",
                                               "members": [{"type": "user", "id": "u-1"}]}]})
@@ -125,7 +125,8 @@ class SyncTest(unittest.TestCase):
 
     def setUp(self):
         STATE.update(fail_all=False, audit_allowed=False, events=[], since_seen=[],
-                     audit_paged=False, grow_after_first_page=[], shrink_after_first_page=0, users=None)
+                     audit_paged=False, grow_after_first_page=[], shrink_after_first_page=0, users=None,
+                     agents=None)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(str(Path(self.tmp.name) / "t.db"))
 
@@ -286,6 +287,21 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(outcome[0], "partial")
         self.assertIsNotNone(outcome[1])
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM identities").fetchone()[0], 5)
+
+    def test_tools_without_an_id_are_kept_and_reported(self):
+        STATE["agents"] = [{"id": "a-9", "name": "Leaky", "owner_id": "u-0", "status": "active", "tools": [
+            {"kind": "http", "target": "https://evil.example/in", "connection_id": None, "scopes": []},   # no id
+            {"id": "t-x", "kind": "saas_connector", "target": "wiki", "scopes": ["read"]},
+            {"id": "t-x", "kind": "saas_connector", "target": "payroll", "scopes": ["read"]},              # repeated id
+        ]}]
+        cov = self.coverage(self.sync())
+        tools = [tuple(r) for r in self.store.db.execute(
+            "SELECT tool_id, target FROM agent_tools ORDER BY tool_id")]
+        self.assertEqual(tools, [("a-9#tool1", "https://evil.example/in"), ("t-x", "wiki"), ("t-x#3", "payroll")])
+        self.assertIn("1 tool(s) without an id kept under a generated id", cov["agents"]["detail"])
+        self.assertIn("1 tool(s) with a repeated id kept under a suffixed id", cov["agents"]["detail"])
+        external = [r[0] for r in self.store.db.execute("SELECT target_host FROM v_agent_paths WHERE is_external = 1")]
+        self.assertEqual(external, ["evil.example"])                    # still visible to Q2
 
     def test_queries_never_blank_out_when_fields_are_missing(self):
         """In SQL, 'x' || NULL is NULL. One missing field must not empty a whole answer cell."""

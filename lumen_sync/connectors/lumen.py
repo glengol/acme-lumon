@@ -20,7 +20,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..http import HttpClient
-from .base import (TOOL_APP_CONNECTION, TOOL_OUTBOUND_URL, Connector, FetchResult, Resource,
+from .base import (NOTES, TOOL_APP_CONNECTION, TOOL_OUTBOUND_URL, Connector, FetchResult, Resource,
                    email_domain, lower_or_none, tri_state_bool, url_host)
 from .paging import fetch_list, fetch_pages
 
@@ -86,33 +86,49 @@ class LumenConnector(Connector):
         } for u in items]}
 
     def _groups(self, items):
-        groups, members = [], []
+        groups, members, skipped = [], [], 0
         for g in items:
             groups.append({"external_id": g["id"], "name": g.get("name")})
             for m in g.get("members") or []:
                 if isinstance(m, dict) and m.get("id"):
                     members.append({"group_id": g["id"], "member_type": lower_or_none(m.get("type")) or "unknown",
                                     "member_id": m["id"]})
-        return {"groups": groups, "group_members": _unique(members, ("group_id", "member_type", "member_id"))}
+                else:
+                    skipped += 1  # a member with no id cannot be identified
+        members, dupes = _unique(members, ("group_id", "member_type", "member_id"))
+        notes = [f"{skipped} group member(s) without an id skipped"] if skipped else []
+        notes += [f"{dupes} duplicate group membership(s) dropped"] if dupes else []
+        return {"groups": groups, "group_members": members, NOTES: notes}
 
     def _agents(self, items):
-        agents, tools = [], []
+        agents, tools, generated, renamed = [], [], 0, 0
         for a in items:
             agents.append({"external_id": a["id"], "name": a.get("name"), "owner_id": a.get("owner_id"),
                            "status_raw": a.get("status"), "status": lower_or_none(a.get("status"))})
-            for t in a.get("tools") or []:
-                if not isinstance(t, dict) or not t.get("id"):
+            seen_ids = set()
+            for position, t in enumerate(a.get("tools") or []):
+                if not isinstance(t, dict):
                     continue
+                # A tool must never vanish from the inventory: one with no id, or a
+                # repeated id, is kept under a generated id and reported in coverage.
+                tool_id = t.get("id")
+                if not tool_id:
+                    tool_id, generated = f"{a['id']}#tool{position + 1}", generated + 1
+                elif tool_id in seen_ids:
+                    tool_id, renamed = f"{tool_id}#{position + 1}", renamed + 1
+                seen_ids.add(tool_id)
                 kind_raw = lower_or_none(t.get("kind"))
                 kind = TOOL_KINDS.get(kind_raw, kind_raw)
                 tools.append({
-                    "agent_id": a["id"], "tool_id": t["id"], "kind": kind, "kind_raw": kind_raw,
+                    "agent_id": a["id"], "tool_id": tool_id, "kind": kind, "kind_raw": kind_raw,
                     "target": t.get("target"),
                     "target_host": url_host(t.get("target")) if kind == TOOL_OUTBOUND_URL else None,
                     "connection_id": t.get("connection_id"),
                     "scopes": json.dumps(t.get("scopes") or []),
                 })
-        return {"agents": agents, "agent_tools": _unique(tools, ("agent_id", "tool_id"))}
+        notes = [f"{generated} tool(s) without an id kept under a generated id"] if generated else []
+        notes += [f"{renamed} tool(s) with a repeated id kept under a suffixed id"] if renamed else []
+        return {"agents": agents, "agent_tools": tools, NOTES: notes}
 
     def _connections(self, items):
         return {"connections": [{
@@ -139,11 +155,12 @@ def _parse_time(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _unique(rows: list[dict], key: tuple[str, ...]) -> list[dict]:
+def _unique(rows: list[dict], key: tuple[str, ...]) -> tuple[list[dict], int]:
+    """Drop rows whose key repeats; return the kept rows and how many were dropped."""
     seen, out = set(), []
     for row in rows:
         k = tuple(row[f] for f in key)
         if k not in seen:
             seen.add(k)
             out.append(row)
-    return out
+    return out, len(rows) - len(out)

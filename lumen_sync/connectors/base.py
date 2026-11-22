@@ -33,7 +33,7 @@ class Resource:
     name: str                               # e.g. "users"; also the coverage key
     tables: tuple[str, ...]                 # tables this resource owns
     fetch: Callable[[str | None], FetchResult]   # receives the cursor value (None = fetch everything)
-    to_rows: Callable[[list[dict]], dict[str, list[dict]]]  # raw items -> {table: rows}
+    to_rows: Callable[[list[dict]], dict[str, list[dict]]]  # raw items -> {table: rows}, plus optional NOTES
     mode: str = "replace"                   # replace | append
     cursor: tuple[str, str] | None = None   # (table, column) holding the newest stored value
 
@@ -43,6 +43,11 @@ class Connector:
 
     def resources(self) -> list[Resource]:
         raise NotImplementedError
+
+
+# to_rows may add this key with a list of strings: things it skipped or changed
+# while mapping. They are shown in the coverage report, so nothing is dropped silently.
+NOTES = "notes"
 
 
 # ---------------------------------------------------------------- neutral vocabulary
