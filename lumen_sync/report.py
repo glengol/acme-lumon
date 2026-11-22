@@ -14,6 +14,9 @@ def print_report(store: Store) -> None:
         print("No sync has run yet. Run: python3 -m lumen_sync sync")
         return
     _print_freshness(store)
+    for row in store.db.execute("SELECT source_app, group_name FROM v_admin_groups_missing"):
+        print(f"  WARNING: admin group '{row['group_name']}' ({row['source_app']}) from config.json matches no "
+              f"group by id or name; admin answers will miss its members")
 
     for path in sorted(QUERIES.glob("q*.sql")):
         sql = path.read_text()

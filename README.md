@@ -201,7 +201,8 @@ The analysis rules are data in `lumen_sync/config.json`, not code:
 ```
 
 - An app that is **not listed is treated as sensitive** ("if in doubt, sensitive").
-- After editing, run `sync` again to reload the config, then run `report`.
+- After editing, run `report` again. It reloads the config each time, so no new `sync` is needed.
+- If a configured admin group matches no group in Lumen (by id, or by name ignoring case and spaces), the report prints a **WARNING** instead of silently showing no admins.
 
 ---
 

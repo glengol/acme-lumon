@@ -29,8 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "report":
+        if not Path(args.db).is_file():
+            print(f"error: database {args.db} not found. Run 'sync' first, or pass --db", file=sys.stderr)
+            return 2
         store = Store(args.db)
         try:
+            store.load_config(json.loads(Path(args.config).read_text()))  # policy edits apply without a re-sync
             print_report(store)
         finally:
             store.close()

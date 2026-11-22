@@ -189,6 +189,18 @@ class SyncTest(unittest.TestCase):
                     if column in columns:
                         self.assertTrue(row[columns.index(column)], f"{name}: empty {column} in {tuple(row)}")
 
+    def test_admin_group_matches_by_id_or_loose_name_and_warns_when_missing(self):
+        self.sync()                                   # fake API has group g-1 "Admins" with member u-1
+        admins = lambda: [r[0] for r in self.store.db.execute("SELECT external_id FROM v_admins")]
+        missing = lambda: [r[0] for r in self.store.db.execute("SELECT group_name FROM v_admin_groups_missing")]
+        for entry in (" admins ", "ADMINS", "g-1"):
+            self.store.load_config({"admin_groups": {"lumen": [entry]}})
+            self.assertEqual(admins(), ["u-1"], entry)
+            self.assertEqual(missing(), [], entry)
+        self.store.load_config({"admin_groups": {"lumen": ["Admin Team"]}})
+        self.assertEqual(admins(), [])
+        self.assertEqual(missing(), ["Admin Team"])   # surfaced as a warning, not silent
+
     def test_normalization(self):
         self.sync()
         statuses = {r[0] for r in self.store.db.execute("SELECT status FROM identities")}
