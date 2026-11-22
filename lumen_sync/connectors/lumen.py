@@ -8,17 +8,23 @@ API behaviour this code relies on, all observed by probing (see PLAN.md, API map
 - /v1/audit needs the `audit.read` scope. Without it the API answers 403 and
   suggests self-declaring scopes in an `X-Lumen-Scopes` header. We never send
   that header: permissions come from the token Acme issued, not from us.
+- Audit is a log, so it is collected incrementally (`since` = newest stored
+  event minus an overlap) and stored append-only. Events that age out of
+  Lumen's retention are kept here. If a response carries `total_pages`, every
+  page is fetched.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from ..http import ApiError, HttpClient
 from .base import (Connector, FetchResult, Resource, email_domain, lower_or_none,
                    tri_state_bool, url_host)
 
-MAX_PAGES = 10_000  # safety stop in case total_pages is ever absurd
+MAX_PAGES = 10_000                     # safety stop in case total_pages is ever absurd
+AUDIT_OVERLAP = timedelta(minutes=10)  # re-read a little before the cursor; duplicates are harmless
 
 
 class LumenConnector(Connector):
@@ -29,22 +35,39 @@ class LumenConnector(Connector):
 
     def resources(self) -> list[Resource]:
         return [
-            Resource("users", ("identities",), lambda: self._paged("/v1/users"), self._users),
-            Resource("groups", ("groups", "group_members"), lambda: self._single("/v1/groups"), self._groups),
-            Resource("agents", ("agents", "agent_tools"), lambda: self._paged("/v1/agents"), self._agents),
-            Resource("connections", ("connections",), lambda: self._single("/v1/connections"), self._connections),
-            Resource("audit", ("events",), lambda: self._single("/v1/audit"), self._events),
+            Resource("users", ("identities",), lambda _: self._paged("/v1/users"), self._users),
+            Resource("groups", ("groups", "group_members"), lambda _: self._single("/v1/groups"), self._groups),
+            Resource("agents", ("agents", "agent_tools"), lambda _: self._paged("/v1/agents"), self._agents),
+            Resource("connections", ("connections",), lambda _: self._single("/v1/connections"), self._connections),
+            Resource("audit", ("events",), self._audit, self._events,
+                     mode="append", cursor=("events", "occurred_at")),
         ]
 
     # ------------------------------------------------------------ fetching
 
-    def _single(self, path: str) -> FetchResult:
-        body = self.client.get_json(path)
+    def _single(self, path: str, params: dict | None = None) -> FetchResult:
+        """One call. If the response turns out to be paginated, follow it."""
+        body = self.client.get_json(path, params)
+        if "total_pages" in body:
+            return self._paged(path, params, first=body)
         items, notes = _dedupe(_data(path, body))
         return FetchResult(items, pages=None, notes=notes)
 
-    def _paged(self, path: str) -> FetchResult:
-        first = self.client.get_json(path, {"page": 1})
+    def _audit(self, cursor: str | None) -> FetchResult:
+        if cursor is None:
+            result = self._single("/v1/audit")
+            result.notes.append("full history (first collection)")
+            return result
+        since = _parse_time(cursor) - AUDIT_OVERLAP
+        since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = self._single("/v1/audit", {"since": since_text})
+        result.notes.append(f"incremental since {since_text}")
+        return result
+
+    def _paged(self, path: str, params: dict | None = None, first: dict | None = None) -> FetchResult:
+        params = dict(params or {})
+        if first is None:
+            first = self.client.get_json(path, {**params, "page": 1})
         total = first.get("total_pages")
         if not isinstance(total, int) or total < 1:
             raise ApiError(path, 200, "missing_total_pages", first)
@@ -53,7 +76,7 @@ class LumenConnector(Connector):
 
         items = list(_data(path, first))
         for page in range(2, total + 1):
-            body = self.client.get_json(path, {"page": page})
+            body = self.client.get_json(path, {**params, "page": page})
             if body.get("total_pages") != total:
                 # The list changed while we paged; a mixed snapshot is not safe to store.
                 raise ApiError(path, 200, f"total_pages_changed ({total} -> {body.get('total_pages')})", body)
@@ -119,6 +142,11 @@ class LumenConnector(Connector):
 
 
 # ---------------------------------------------------------------- helpers
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 def _data(path: str, body: dict) -> list:
     data = body.get("data")

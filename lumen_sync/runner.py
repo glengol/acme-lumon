@@ -21,8 +21,9 @@ def run_sync(connector: Connector, store: Store, base_url: str) -> int:
     run_id = store.start_run(connector.source_app, base_url)
     ok = failed = 0
     for res in connector.resources():
+        cursor = store.newest(connector.source_app, *res.cursor) if res.cursor else None
         try:
-            result = res.fetch()
+            result = res.fetch(cursor)
             rows = res.to_rows(result.items)
         except ApiError as exc:
             failed += 1
@@ -33,7 +34,8 @@ def run_sync(connector: Connector, store: Store, base_url: str) -> int:
             failed += 1
             store.record_coverage(run_id, res.name, "failed", error=f"{type(exc).__name__}: {exc}")
             continue
-        store.replace_resource(run_id, connector.source_app, res.name, res.tables, result.items, rows)
+        write = store.append_resource if res.mode == "append" else store.replace_resource
+        write(run_id, connector.source_app, res.name, res.tables, result.items, rows)
         store.record_coverage(run_id, res.name, "ok", records=len(result.items), pages=result.pages,
                               detail="; ".join(result.notes) or None)
         ok += 1

@@ -69,6 +69,31 @@ class Store:
                 sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})"
                 self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
 
+    def append_resource(self, run_id: int, source_app: str, resource: str, tables: tuple[str, ...],
+                        raw_items: list[dict], rows: dict[str, list[dict]]) -> None:
+        """Add or update rows by primary key, never delete. For logs such as audit events.
+
+        Re-fetching an overlap window is harmless: the same event id lands on the same row.
+        """
+        with self.db:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO raw_records (source_app, resource, external_id, payload, run_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(source_app, resource, item["id"], json.dumps(item, sort_keys=True), run_id) for item in raw_items])
+            for table in tables:
+                table_rows = rows.get(table, [])
+                if not table_rows:
+                    continue
+                columns = ["source_app", *table_rows[0].keys()]
+                sql = (f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) "
+                       f"VALUES ({', '.join('?' * len(columns))})")
+                self.db.executemany(sql, [(source_app, *r.values()) for r in table_rows])
+
+    def newest(self, source_app: str, table: str, column: str) -> str | None:
+        """Largest stored value of `column` for this app, used as an incremental-fetch cursor."""
+        row = self.db.execute(f"SELECT MAX({column}) FROM {table} WHERE source_app = ?", (source_app,)).fetchone()
+        return row[0] if row else None
+
     # ------------------------------------------------------------ policy config
 
     def load_config(self, config: dict) -> None:

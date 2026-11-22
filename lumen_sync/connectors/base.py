@@ -21,10 +21,21 @@ class FetchResult:
 
 @dataclass
 class Resource:
+    """One thing to collect.
+
+    mode "replace": the source returns the full current state; each successful
+    fetch replaces this resource's rows (users, groups, agents, ...).
+    mode "append": the source is a log; rows are only ever added or updated,
+    never deleted, so history survives source-side retention (audit events).
+    An append resource names a cursor (table, column): the newest value already
+    stored is passed to fetch() so only newer records are requested.
+    """
     name: str                               # e.g. "users"; also the coverage key
-    tables: tuple[str, ...]                 # tables this resource owns (replaced together)
-    fetch: Callable[[], FetchResult]
+    tables: tuple[str, ...]                 # tables this resource owns
+    fetch: Callable[[str | None], FetchResult]   # receives the cursor value (None = fetch everything)
     to_rows: Callable[[list[dict]], dict[str, list[dict]]]  # raw items -> {table: rows}
+    mode: str = "replace"                   # replace | append
+    cursor: tuple[str, str] | None = None   # (table, column) holding the newest stored value
 
 
 class Connector:
